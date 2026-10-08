@@ -1,0 +1,6 @@
+# Personal photos & renders stay local (public repo)
+showreel/assets/
+showreel/stills/
+showreel/*.mp4
+showreel/*.wav
+showreel/render.log
