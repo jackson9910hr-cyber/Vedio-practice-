@@ -222,7 +222,7 @@ function titleShot(t, p) {
   caption('우리 가족, 가을 소풍', null, W / 2, 540, t, 1.0, 5.1, 'center', 104);
   const lp = E.inOutCubic(prog(t, 1.9, 2.8));
   ctx.save(); ctx.globalAlpha = out; ctx.fillStyle = C.warm; ctx.fillRect(W / 2 - 160 * lp, 590, 320 * lp, 2); ctx.restore();
-  caption('창원단감테마공원  ·  2026. 10', null, W / 2, 655, t, 2.3, 5.1, 'center', 36);
+  caption('가을 나들이  ·  우리의 하루', null, W / 2, 655, t, 2.3, 5.1, 'center', 36);
 }
 function chapterShot(t, p, i, num, ko, en, kb) {
   kbFull(i, p, kb);
@@ -320,7 +320,7 @@ function endShot(t, p) {
   printShot(9, 1, W / 2, { h: 720, z0: 1.0, z1: 1.14, drift: 10 });
   ctx.globalAlpha = 1;
   caption('우리 가족의 가을', null, W / 2, 520, t, t0 + 0.9, DUR - 0.3, 'center', 84);
-  caption('2026. 10  ·  창원', 'Thank you for the memories', W / 2, 610, t, t0 + 1.5, DUR - 0.3, 'center', 34);
+  caption('사랑하는 우리 가족', 'Thank you for the memories', W / 2, 610, t, t0 + 1.5, DUR - 0.3, 'center', 34);
   const hp = E.outBack(prog(t, t0 + 2.2, t0 + 2.6), 2.5) * (1 - prog(t, DUR - 0.75, DUR - 0.3));
   if (hp > 0) heart(W / 2, 720, 1.6 * hp, '#FF8A9A');
 }

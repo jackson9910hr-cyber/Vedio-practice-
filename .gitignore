@@ -1,6 +1,32 @@
-# Personal photos & renders stay local (public repo)
-showreel/assets/
-showreel/stills/
-showreel/*.mp4
-showreel/*.wav
-showreel/render.log
+# ── PRIVACY: personal photos/videos must NEVER be committed (public repo) ──
+# Media of any kind, anywhere in the repo
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.heic
+*.heif
+*.bmp
+*.tif
+*.tiff
+*.raw
+*.dng
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.aac
+# Working folders that hold personal media or renders
+**/assets/
+**/stills/
+**/frames/
+**/output/
+# Downloaded fonts and logs
+**/fonts/
+*.log
