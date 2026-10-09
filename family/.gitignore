@@ -1,0 +1,6 @@
+assets/
+fonts/
+stills/
+*.mp4
+*.wav
+render.log

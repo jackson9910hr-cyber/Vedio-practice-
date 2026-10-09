@@ -1,0 +1,434 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Autumn Picnic</title>
+<style>
+  @font-face { font-family: 'Gowun'; src: url('fonts/GowunBatang-Regular.ttf'); font-weight: 400; }
+  @font-face { font-family: 'Gowun'; src: url('fonts/GowunBatang-Bold.ttf'); font-weight: 700; }
+  @font-face { font-family: 'Pen'; src: url('fonts/NanumPenScript-Regular.ttf'); }
+  html,body{margin:0;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+/* =========================================================
+   우리 가족, 가을 소풍 — cinematic family travel film (44s)
+   Style: warm film grade · letterbox 2.35:1 · slow Ken Burns
+   with varied direction · cross-dissolves + light leaks ·
+   serif (명조) bilingual captions · handwritten notes.
+   90 BPM → every cut lands on a bar (8/3 s).
+   ========================================================= */
+const W = 1920, H = 1080, FPS = 30, DUR = 44;
+const BAR = 8 / 3;
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');
+const LB = Math.round((H - W / 2.35) / 2);           // letterbox bar height (131)
+const C = { cream: '#F6EEDF', warm: '#FFB066', orange: '#FF8A2A', pink: '#FF7A8A', ink: '#120D09', paper: '#EFE4D2' };
+const SERIF = 'Gowun', PEN = 'Pen';
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const TAU = Math.PI * 2;
+const E = {
+  inOutSine: x => -(Math.cos(Math.PI * x) - 1) / 2,
+  outCubic: x => 1 - Math.pow(1 - x, 3),
+  inOutCubic: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  outBack: (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2),
+  outExpo: x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x),
+};
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+/* ---------- assets ---------- */
+const IMG = [];
+const FOCUS = { 1: [.5, .45], 2: [.52, .32], 3: [.45, .32], 4: [.5, .35], 5: [.62, .5], 6: [.52, .3],
+  7: [.52, .5], 8: [.52, .58], 9: [.5, .55], 10: [.3, .62], 11: [.45, .5] };
+const PRE = { blur: [] };
+async function init() {
+  await Promise.all(Array.from({ length: 11 }, (_, i) => new Promise(res => {
+    const im = new Image(); im.onload = () => { IMG[i + 1] = im; res(); };
+    im.src = `assets/p${String(i + 1).padStart(2, '0')}.jpg`;
+  })));
+  await Promise.all([document.fonts.load(`700 80px ${SERIF}`), document.fonts.load(`400 40px ${SERIF}`),
+    document.fonts.load(`60px ${PEN}`), document.fonts.load(`bold 30px "DejaVu Sans Mono"`)]);
+  for (let i = 1; i <= 11; i++) {
+    const b = mk(W / 2, H / 2), x = b.getContext('2d');
+    x.filter = 'blur(26px) saturate(1.15) brightness(0.72)';
+    cover(x, IMG[i], -40, -40, W / 2 + 80, H / 2 + 80, FOCUS[i][0], FOCUS[i][1], 1);
+    PRE.blur[i] = b;
+  }
+  PRE.grain = [];
+  for (let g = 0; g < 8; g++) {
+    const c = mk(480, 270), x = c.getContext('2d'), d = x.createImageData(480, 270);
+    for (let i = 0; i < d.data.length; i += 4) { const v = hash(g * 1e5 + i) * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+    x.putImageData(d, 0, 0); PRE.grain.push(c);
+  }
+}
+
+/* ---------- drawing helpers ---------- */
+function cover(x, img, dx, dy, dw, dh, fx = .5, fy = .5, zoom = 1) {
+  const iw = img.width, ih = img.height, s = Math.max(dw / iw, dh / ih) * zoom;
+  const sw = dw / s, sh = dh / s;
+  const sx = clamp(fx * iw - sw / 2, 0, iw - sw), sy = clamp(fy * ih - sh / 2, 0, ih - sh);
+  x.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+function shadowRect(x, y, w, h, blur = 40, a = 0.45) {
+  ctx.save(); ctx.shadowColor = `rgba(0,0,0,${a})`; ctx.shadowBlur = blur; ctx.shadowOffsetY = blur / 3;
+  ctx.fillStyle = '#fff'; ctx.fillRect(x, y, w, h); ctx.restore();
+}
+// Ken Burns full-bleed. o = {z:[z0,z1], f:[[fx0,fy0],[fx1,fy1]]}
+function kbFull(i, p, o) {
+  const e = E.inOutSine(p), z = lerp(o.z[0], o.z[1], e);
+  const f0 = o.f[0], f1 = o.f[1];
+  cover(ctx, IMG[i], 0, 0, W, H, lerp(f0[0], f1[0], e), lerp(f0[1], f1[1], e), z);
+}
+// Portrait photo as a print on a blurred bed of itself
+function printShot(i, p, cx, o = {}) {
+  ctx.drawImage(PRE.blur[i], 0, 0, W, H);
+  ctx.fillStyle = 'rgba(30,18,8,0.25)'; ctx.fillRect(0, 0, W, H);
+  const h = o.h || 660, w = h * 2 / 3, b = 14;
+  const rot = (o.rot || 0) * (1 - E.outCubic(prog(p, 0, 0.35)) * 0.5);
+  const drift = (p - 0.5) * (o.drift || 24);
+  ctx.save(); ctx.translate(cx, H / 2 + drift); ctx.rotate(rot);
+  shadowRect(-w / 2 - b, -h / 2 - b, w + b * 2, h + b * 2, 50, 0.5);
+  ctx.save(); ctx.beginPath(); ctx.rect(-w / 2, -h / 2, w, h); ctx.clip();
+  const f = FOCUS[i], z = lerp(o.z0 || 1.0, o.z1 || 1.08, E.inOutSine(p));
+  cover(ctx, IMG[i], -w / 2, -h / 2, w, h, f[0], f[1], z);
+  ctx.restore(); ctx.restore();
+}
+/* captions: bilingual serif, per-character fade/slide up */
+function caption(ko, en, x, y, t, t0, t1, align = 'center', size = 56) {
+  const out = 1 - prog(t, t1 - 0.45, t1);
+  if (t < t0 || out <= 0) return;
+  ctx.save();
+  ctx.font = `700 ${size}px ${SERIF}`; ctx.textBaseline = 'alphabetic';
+  const chars = [...ko], widths = chars.map(c => ctx.measureText(c).width);
+  const tw = widths.reduce((a, b) => a + b, 0);
+  let cx = align === 'center' ? x - tw / 2 : align === 'right' ? x - tw : x;
+  ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 18;
+  chars.forEach((c, k) => {
+    const p = E.outCubic(prog(t, t0 + k * 0.035, t0 + k * 0.035 + 0.55));
+    ctx.globalAlpha = p * out; ctx.fillStyle = C.cream;
+    ctx.fillText(c, cx, y + (1 - p) * 14); cx += widths[k];
+  });
+  if (en) {
+    const p = E.outCubic(prog(t, t0 + 0.35, t0 + 1.0));
+    ctx.globalAlpha = p * out * 0.85;
+    ctx.font = `400 ${Math.round(size * 0.42)}px ${SERIF}`; ctx.letterSpacing = '6px';
+    ctx.textAlign = align; ctx.fillStyle = C.warm;
+    ctx.fillText(en.toUpperCase(), x + (align === 'center' ? 3 : 0), y + size * 0.85);
+    ctx.letterSpacing = '0px';
+  }
+  ctx.restore();
+}
+/* handwritten note — revealed left→right like a pen stroke */
+function pen(str, x, y, t, t0, t1, o = {}) {
+  const out = 1 - prog(t, t1 - 0.4, t1);
+  if (t < t0 || out <= 0) return;
+  const size = o.size || 76;
+  ctx.save();
+  ctx.font = `${size}px ${PEN}`; ctx.textAlign = 'left';
+  const w = ctx.measureText(str).width;
+  const ax = o.align === 'center' ? x - w / 2 : o.align === 'right' ? x - w : x;
+  const p = E.inOutSine(prog(t, t0, t0 + (o.dur || 0.7)));
+  ctx.translate(ax, y); ctx.rotate(o.rot || -0.04);
+  ctx.beginPath(); ctx.rect(-10, -size, (w + 20) * p, size * 1.5); ctx.clip();
+  ctx.globalAlpha = out;
+  ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 12;
+  ctx.fillStyle = o.color || '#FFE3B8'; ctx.fillText(str, 0, 0);
+  ctx.restore();
+}
+function doodle(points, t, t0, dur, col = '#FFE3B8', lw = 5, t1 = 99) {
+  const p = E.inOutSine(prog(t, t0, t0 + dur)), out = 1 - prog(t, t1 - 0.4, t1);
+  if (p <= 0 || out <= 0) return;
+  ctx.save(); ctx.globalAlpha = out;
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 8;
+  let len = 0; for (let i = 1; i < points.length; i++) len += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  ctx.setLineDash([len * p, len]);
+  ctx.beginPath(); points.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.stroke();
+  ctx.restore();
+}
+function heart(x, y, s, col, a = 1) {
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.scale(s, s); ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(0, 6); ctx.bezierCurveTo(-14, -6, -8, -18, 0, -10); ctx.bezierCurveTo(8, -18, 14, -6, 0, 6); ctx.fill();
+  ctx.restore();
+}
+
+/* =========================================================
+   SHOTS — each [start, end] overlaps neighbours for a
+   0.7s cross-dissolve; draw(t, p) paints one full frame.
+   ========================================================= */
+const X = 0.35; // half dissolve
+const B = n => n * BAR;
+const SHOTS = [
+  { s: 0, e: B(2), draw: titleShot },
+  { s: B(2), e: B(3), draw: (t, p) => { kbFull(1, p, { z: [1.02, 1.16], f: [[.5, .5], [.5, .43]] });
+      caption('코스모스 사이로, 활짝', 'Among the cosmos', W / 2, H - LB - 120, t, B(2) + 0.4, B(3) + X); } },
+  { s: B(3), e: B(4), draw: (t, p) => { printShot(9, p, 1300, { rot: 0.02, z0: 1.12, z1: 1.0 });
+      caption('분홍빛 바람 속,', null, 300, 470, t, B(3) + 0.4, B(4) + X, 'left', 62);
+      caption('우리 남매', 'Pink breeze, two of us', 300, 560, t, B(3) + 0.75, B(4) + X, 'left', 62); } },
+  { s: B(4), e: B(5), draw: (t, p) => chapterShot(t, p, 5, '01', '전통놀이 한마당', 'Traditional games', { z: [1.12, 1.02], f: [[.4, .5], [.62, .5]] }) },
+  { s: B(5), e: B(6), draw: splitShot },
+  { s: B(6), e: B(7), draw: (t, p) => { printShot(3, p, 640, { rot: -0.025 });
+      pen('동생도 질 수 없지!', 1060, 500, t, B(6) + 0.45, B(7) + X, { size: 96 });
+      doodle([[1080, 560], [1000, 600], [930, 640], [880, 660]], t, B(6) + 1.1, 0.4, '#FFE3B8', 5, B(7) + X);
+      doodle([[905, 635], [880, 660], [912, 668]], t, B(6) + 1.45, 0.2, '#FFE3B8', 5, B(7) + X);
+      caption('고리 던지기', 'Ring toss', 1060, 700, t, B(6) + 0.9, B(7) + X, 'left', 44); } },
+  { s: B(7), e: B(8), draw: polaroidShot },
+  { s: B(8), e: B(9), draw: (t, p) => { printShot(6, p, 1300, { rot: 0.018, z0: 1.0, z1: 1.1 });
+      caption('지게 지고, 브이!', 'Little porter', 300, 520, t, B(8) + 0.4, B(9) + X, 'left', 64);
+      pen('힘들어도 웃어요 :)', 300, 650, t, B(8) + 1.2, B(9) + X, { size: 64, rot: -0.03 }); } },
+  { s: B(9), e: B(10), draw: (t, p) => chapterShot(t, p, 7, '02', '단감 친구들', 'Sweet persimmon friends', { z: [1.0, 1.12], f: [[.5, .45], [.52, .5]] }) },
+  { s: B(10), e: B(11), draw: (t, p) => { kbFull(8, p, { z: [1.18, 1.04], f: [[.52, .6], [.5, .5]] });
+      caption('단감 친구들과 찰칵', 'Say cheese', W / 2, H - LB - 120, t, B(10) + 0.4, B(11) + X); } },
+  { s: B(11), e: B(12), draw: (t, p) => { printShot(11, p, 620, { rot: -0.02, z0: 1.1, z1: 1.0 });
+      caption('세상에서 제일 큰', null, 1040, 480, t, B(11) + 0.4, B(12) + X, 'left', 60);
+      caption('단감 위에서', 'On the biggest persimmon', 1040, 570, t, B(11) + 0.7, B(12) + X, 'left', 60); } },
+  { s: B(12), e: B(13), draw: (t, p) => { kbFull(10, p, { z: [1.0, 1.5], f: [[.5, .5], [.27, .66]] });
+      const bg = ctx.createLinearGradient(0, H - LB - 260, 0, H - LB);
+      bg.addColorStop(0, 'rgba(20,10,4,0)'); bg.addColorStop(1, 'rgba(20,10,4,0.7)');
+      ctx.fillStyle = bg; ctx.fillRect(0, H - LB - 260, W, 260);
+      pen('앗, 동생 눈물 버튼 ON…', 1240, H - LB - 70, t, B(12) + 0.5, B(12) + 1.9, { size: 84, align: 'center', rot: -0.02 });
+      pen('그래도 금방 웃었답니다', 1240, H - LB - 70, t, B(12) + 1.7, B(13) + X, { size: 84, align: 'center', rot: -0.02 });
+      heart(1650, H - LB - 100, 2.2, '#FF8A9A', E.outBack(prog(t, B(12) + 2.2, B(12) + 2.5)) * (1 - prog(t, B(13) - 0.05, B(13) + X))); } },
+  { s: B(13), e: B(14), draw: filmstripShot },
+  { s: B(14), e: B(15), draw: (t, p) => { printShot(9, p, W / 2, { h: 720, z0: 1.0, z1: 1.14, drift: 10 });
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(0, H - LB - 220, W, 220);
+      caption('함께라서 더 따뜻했던 가을', 'Warmer, because we were together', W / 2, H - LB - 110, t, B(14) + 0.5, B(15) + X, 'center', 60); } },
+  { s: B(15), e: DUR + 1, draw: endShot },
+];
+
+function titleShot(t, p) {
+  // warm bed: blurred → sharp cosmos photo, slow push
+  const z = 1.08 + p * 0.06;
+  cover(ctx, IMG[1], 0, 0, W, H, .5, .5, z);
+  ctx.globalAlpha = 1 - E.inOutSine(prog(t, 2.6, 5.4));
+  ctx.drawImage(PRE.blur[1], 0, 0, W, H);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = `rgba(18,12,6,${0.35 * (1 - prog(t, 3.6, 5.4))})`; ctx.fillRect(0, 0, W, H);
+  const out = 1 - prog(t, 4.3, 5.1);
+  ctx.save(); ctx.globalAlpha = out;
+  ctx.textAlign = 'center';
+  const a1 = E.outCubic(prog(t, 0.6, 1.6));
+  ctx.globalAlpha = a1 * out; ctx.font = `400 26px ${SERIF}`; ctx.letterSpacing = '14px'; ctx.fillStyle = C.warm;
+  ctx.fillText('AN AUTUMN DAY', W / 2 + 7, 420); ctx.letterSpacing = '0px';
+  ctx.restore();
+  caption('우리 가족, 가을 소풍', null, W / 2, 540, t, 1.0, 5.1, 'center', 104);
+  const lp = E.inOutCubic(prog(t, 1.9, 2.8));
+  ctx.save(); ctx.globalAlpha = out; ctx.fillStyle = C.warm; ctx.fillRect(W / 2 - 160 * lp, 590, 320 * lp, 2); ctx.restore();
+  caption('창원단감테마공원  ·  2026. 10', null, W / 2, 655, t, 2.3, 5.1, 'center', 36);
+}
+function chapterShot(t, p, i, num, ko, en, kb) {
+  kbFull(i, p, kb);
+  const g = ctx.createLinearGradient(0, 0, 900, 0);
+  g.addColorStop(0, 'rgba(18,10,4,0.7)'); g.addColorStop(1, 'rgba(18,10,4,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 1100, H);
+  const t0 = t - p * BAR; // shot start
+  ctx.save();
+  const a = E.outCubic(prog(t, t0 + 0.3, t0 + 1.0)) * (1 - prog(t, t0 + BAR - 0.4, t0 + BAR + X));
+  ctx.globalAlpha = a; ctx.fillStyle = C.warm; ctx.font = `400 28px ${SERIF}`; ctx.letterSpacing = '12px';
+  ctx.fillText(`CHAPTER ${num}`, 200, 440); ctx.letterSpacing = '0px';
+  ctx.restore();
+  caption(ko, en, 196, 560, t, t0 + 0.5, t0 + BAR + X, 'left', 92);
+  const lp = E.inOutCubic(prog(t, t0 + 1.0, t0 + 1.8)) * (1 - prog(t, t0 + BAR - 0.4, t0 + BAR + X));
+  ctx.fillStyle = C.warm; ctx.fillRect(200, 470, 120 * lp, 2);
+}
+function splitShot(t, p) {
+  const t0 = B(5);
+  ctx.fillStyle = '#1b130c'; ctx.fillRect(0, 0, W, H);
+  const pw = W / 2;
+  [[2, 0, -1], [4, pw, 1]].forEach(([i, x, dir], k) => {
+    const e = E.outExpo(prog(t, t0 + k * 0.12 - 0.2, t0 + k * 0.12 + 0.9));
+    ctx.save(); ctx.beginPath(); ctx.rect(x, 0, pw, H); ctx.clip();
+    ctx.translate(0, (1 - e) * 140 * dir);
+    cover(ctx, IMG[i], x, -70, pw, H + 140, FOCUS[i][0], FOCUS[i][1] + 0.08, 1.04 + p * 0.06);
+    ctx.restore();
+  });
+  ctx.fillStyle = C.cream; ctx.fillRect(pw - 3, 0, 6, H);
+  pen('하나, 둘…', 160, 360, t, t0 + 0.6, t0 + BAR + X, { size: 92 });
+  pen('슛~!', 1180, 360, t, t0 + 1.4, t0 + BAR + X, { size: 110, rot: -0.08 });
+  caption('투호 & 고리 던지기', 'One, two... shoot!', W / 2, H - LB - 90, t, t0 + 0.8, t0 + BAR + X, 'center', 48);
+}
+function polaroidShot(t, p) {
+  const t0 = B(7);
+  ctx.fillStyle = C.paper; ctx.fillRect(0, 0, W, H);
+  // subtle paper fibres
+  ctx.globalAlpha = 0.06; ctx.drawImage(PRE.grain[3], 0, 0, W, H); ctx.globalAlpha = 1;
+  const cards = [
+    { i: 5, x: 470, y: 520, r: -0.09, cap: '투호 던지기!' },
+    { i: 2, x: 860, y: 470, r: 0.05, cap: '집중, 또 집중' },
+    { i: 3, x: 1250, y: 540, r: -0.04, cap: '동생 차례~' },
+    { i: 4, x: 1560, y: 460, r: 0.08, cap: '골인!' },
+  ];
+  cards.forEach((c, k) => {
+    const td = t0 + 0.15 + k * (BAR / 4);
+    const e = prog(t, td, td + 0.45);
+    if (e <= 0) return;
+    const s = lerp(1.35, 1, E.outBack(e, 1.4)), a = clamp(e * 3);
+    const w = 360, ph = 340;
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(c.x, c.y + (1 - E.outCubic(e)) * -40); ctx.rotate(c.r * (0.4 + 0.6 * e)); ctx.scale(s, s);
+    shadowRect(-w / 2, -ph / 2 - 20, w, ph + 110, 30, 0.35);
+    ctx.save(); ctx.beginPath(); ctx.rect(-w / 2 + 18, -ph / 2 - 2, w - 36, ph - 30); ctx.clip();
+    cover(ctx, IMG[c.i], -w / 2 + 18, -ph / 2 - 2, w - 36, ph - 30, FOCUS[c.i][0], FOCUS[c.i][1] + 0.05, 1.25);
+    // instant-film develop: starts washed
+    ctx.fillStyle = `rgba(255,248,235,${0.75 * (1 - prog(t, td + 0.1, td + 1.1))})`; ctx.fillRect(-w / 2, -ph / 2 - 2, w, ph);
+    ctx.restore();
+    ctx.font = `46px ${PEN}`; ctx.textAlign = 'center'; ctx.fillStyle = '#3a2a1c';
+    ctx.fillText(c.cap, 0, ph / 2 + 50);
+    ctx.restore();
+  });
+  // flash on each drop
+  cards.forEach((c, k) => {
+    const td = t0 + 0.15 + k * (BAR / 4), f = t - td;
+    if (f >= 0 && f < 0.1) { ctx.fillStyle = `rgba(255,255,255,${0.35 * (1 - f / 0.1)})`; ctx.fillRect(0, 0, W, H); }
+  });
+  pen('오늘의 명장면', W / 2, LB + 110, t, t0 + 0.2, t0 + BAR + X, { size: 78, align: 'center', color: '#B4582A', rot: 0 });
+}
+function filmstripShot(t, p) {
+  const t0 = B(13);
+  ctx.drawImage(PRE.blur[1], 0, 0, W, H);
+  ctx.fillStyle = 'rgba(20,12,6,0.45)'; ctx.fillRect(0, 0, W, H);
+  const fh = 330, fw = 470, gap = 30, sy = H / 2 - fh / 2 - 10;
+  const order = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1, 2, 3];
+  const off = 200 - (t - t0 + 0.4) * 520;
+  ctx.save(); ctx.translate(0, 0); ctx.rotate(-0.03);
+  ctx.fillStyle = '#16100b'; ctx.fillRect(-100, sy - 60, W + 200, fh + 120);
+  for (let x = off % 60 - 60; x < W + 100; x += 60) {
+    ctx.fillStyle = '#e9dcc6'; ctx.fillRect(x, sy - 42, 26, 18); ctx.fillRect(x, sy + fh + 24, 26, 18);
+  }
+  order.forEach((i, k) => {
+    const x = off + k * (fw + gap);
+    if (x > W + 50 || x + fw < -150) return;
+    ctx.save(); ctx.beginPath(); ctx.rect(x, sy, fw, fh); ctx.clip();
+    cover(ctx, IMG[i], x, sy, fw, fh, FOCUS[i][0], FOCUS[i][1], 1.0);
+    ctx.restore();
+  });
+  ctx.restore();
+  caption('하루를 가득 채운 웃음', 'A day full of smiles', W / 2, H - LB - 70, t, t0 + 0.3, t0 + BAR + X, 'center', 50);
+}
+function endShot(t, p) {
+  const t0 = B(15);
+  // last photo fades to warm black
+  ctx.fillStyle = C.ink; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1 - E.inOutSine(prog(t, t0 - 0.2, t0 + 1.2));
+  printShot(9, 1, W / 2, { h: 720, z0: 1.0, z1: 1.14, drift: 10 });
+  ctx.globalAlpha = 1;
+  caption('우리 가족의 가을', null, W / 2, 520, t, t0 + 0.9, DUR - 0.3, 'center', 84);
+  caption('2026. 10  ·  창원', 'Thank you for the memories', W / 2, 610, t, t0 + 1.5, DUR - 0.3, 'center', 34);
+  const hp = E.outBack(prog(t, t0 + 2.2, t0 + 2.6), 2.5) * (1 - prog(t, DUR - 0.75, DUR - 0.3));
+  if (hp > 0) heart(W / 2, 720, 1.6 * hp, '#FF8A9A');
+}
+
+/* =========================================================
+   GLOBAL LOOK — grade, leaks, bokeh, letterbox, stamp, grain
+   ========================================================= */
+const CUTS = SHOTS.map(s => s.s).slice(1);
+function grade() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,170,90,0.24)'; ctx.fillRect(0, 0, W, H); // warm mids
+  ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = 'rgb(14,9,5)'; ctx.fillRect(0, 0, W, H);              // lifted blacks
+  ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = 'rgb(255,247,236)'; ctx.fillRect(0, 0, W, H);        // creamy highlights
+  ctx.restore();
+}
+function lightLeaks(t) {
+  ctx.save(); ctx.globalCompositeOperation = 'screen';
+  // ambient corner glow
+  const amb = 0.18 + 0.06 * Math.sin(t * 0.9);
+  let g = ctx.createRadialGradient(W * 0.92, H * 0.1, 0, W * 0.92, H * 0.1, 900);
+  g.addColorStop(0, `rgba(255,150,70,${amb})`); g.addColorStop(1, 'rgba(255,150,70,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // sweep on every cut
+  for (const c of CUTS) {
+    const k = (t - c) / 0.7; if (k < -1 || k > 1) continue;
+    const a = Math.cos(k * Math.PI / 2) ** 2 * 0.55;
+    const x = W * (0.5 + k * 0.6), y = H * (0.35 + 0.2 * hash(c));
+    g = ctx.createRadialGradient(x, y, 0, x, y, 1100);
+    g.addColorStop(0, `rgba(255,200,120,${a})`); g.addColorStop(0.4, `rgba(255,110,80,${a * 0.6})`); g.addColorStop(1, 'rgba(255,90,60,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+function bokeh(t) {
+  ctx.save(); ctx.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 22; i++) {
+    const r = 20 + hash(i) * 60, sp = 12 + hash(i + 50) * 25;
+    const x = (hash(i + 7) * W + Math.sin(t * 0.3 + i) * 40);
+    const y = ((hash(i + 13) * (H + 200) - t * sp) % (H + 200) + H + 200) % (H + 200) - 100;
+    const a = 0.05 + hash(i + 90) * 0.1;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(255,210,150,${a})`); g.addColorStop(0.7, `rgba(255,190,120,${a * 0.6})`); g.addColorStop(1, 'rgba(255,190,120,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+function letterbox(t) {
+  // opens over the title, closes for the end
+  const open = E.inOutCubic(prog(t, 0.2, 1.6));
+  const close = E.inOutCubic(prog(t, DUR - 1.3, DUR - 0.2));
+  const h = lerp(H / 2, LB, open) + (H / 2 - LB) * close;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, h); ctx.fillRect(0, H - h, W, h);
+}
+function stamp(t) {
+  if (t < B(2) || t > B(15)) return;
+  ctx.save();
+  ctx.font = 'bold 30px "DejaVu Sans Mono"'; ctx.textAlign = 'right';
+  ctx.shadowColor = 'rgba(255,120,30,0.9)'; ctx.shadowBlur = 10;
+  ctx.fillStyle = 'rgba(255,140,50,0.92)';
+  ctx.fillText("'26  10", W - 90, H - LB - 36);
+  ctx.restore();
+}
+
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  // gentle handheld float
+  const fx = Math.sin(t * 0.7) * 3 + Math.sin(t * 1.9) * 1.5, fy = Math.cos(t * 0.6) * 3;
+  ctx.save(); ctx.translate(W / 2 + fx, H / 2 + fy); ctx.scale(1.012, 1.012); ctx.translate(-W / 2, -H / 2);
+  for (const s of SHOTS) {
+    if (t < s.s - X || t > s.e + X) continue;
+    const a = clamp((t - (s.s - X)) / (2 * X));
+    const p = clamp((t - s.s) / (s.e - s.s));
+    ctx.save(); ctx.globalAlpha = s.s === 0 ? 1 : a;
+    if (a < 1 && s.s > 0) {
+      // draw into buffer so the whole shot dissolves as one layer
+      const b = PRE.buf || (PRE.buf = mk(W, H)), bx = b.getContext('2d');
+      const main = ctx; bx.setTransform(1, 0, 0, 1, 0, 0); bx.clearRect(0, 0, W, H);
+      ctxSwap(bx, () => s.draw(t, p));
+      main.drawImage(b, 0, 0);
+    } else s.draw(t, p);
+    ctx.restore();
+  }
+  ctx.restore();
+  grade();
+  lightLeaks(t);
+  bokeh(t);
+  // vignette
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.4, W / 2, H / 2, H * 1.0);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(20,8,0,0.38)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.11;
+  ctx.drawImage(PRE.grain[Math.floor(t * FPS) % 8], 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  letterbox(t);
+  stamp(t);
+  if (t > DUR - 0.25) { ctx.fillStyle = `rgba(0,0,0,${prog(t, DUR - 0.25, DUR - 0.02)})`; ctx.fillRect(0, 0, W, H); }
+}
+// temporarily route drawing helpers to another context
+function ctxSwap(other, fn) { const keep = ctx; ctx = other; try { fn(); } finally { ctx = keep; } }
+
+window.READY = init().then(() => { render(0); return true; });
+if (location.search.includes('play')) window.READY.then(() => {
+  const t0 = performance.now();
+  const loop = () => { render(((performance.now() - t0) / 1000) % DUR); requestAnimationFrame(loop); };
+  loop();
+});
+</script>
+</body>
+</html>
