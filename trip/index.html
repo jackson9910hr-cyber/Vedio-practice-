@@ -1,0 +1,510 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Summer Trip</title>
+<style>
+  @font-face { font-family: 'Han'; src: url('fonts/BlackHanSans-Regular.ttf'); }
+  @font-face { font-family: 'Bebas'; src: url('fonts/BebasNeue-Regular.ttf'); }
+  @font-face { font-family: 'Pen'; src: url('fonts/NanumPenScript-Regular.ttf'); }
+  html,body{margin:0;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+/* =========================================================
+   SUMMER TRIP — upbeat beat-synced travel reel (32s)
+   Style: bright pop palette · hard cuts on the beat ·
+   whip pans / colour wipes / flash punches · beat-pulse
+   zoom · stop-motion flips · bold kinetic type + stickers.
+   120 BPM → beat 0.5s, bar 2s; every cut sits on a beat.
+   ========================================================= */
+const W = 1920, H = 1080, FPS = 30, DUR = 32;
+const BEAT = 0.5, BAR = 2;
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');
+const C = { sun: '#FFD23F', ocean: '#1E9BFF', deep: '#0B5FB0', coral: '#FF5A5F', mint: '#3DDC97',
+  white: '#FFFFFF', ink: '#14213D', cream: '#FFF6E0' };
+const HAN = 'Han', BEBAS = 'Bebas', PEN = 'Pen';
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const TAU = Math.PI * 2;
+const E = {
+  inOutSine: x => -(Math.cos(Math.PI * x) - 1) / 2,
+  outCubic: x => 1 - Math.pow(1 - x, 3),
+  inCubic: x => x * x * x,
+  inOutCubic: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  outBack: (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2),
+  outExpo: x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x),
+};
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+/* ---------- assets ---------- */
+const IMG = [];
+const FOCUS = { 1: [.45, .55], 2: [.5, .62], 3: [.5, .55], 4: [.5, .62], 5: [.5, .55], 6: [.5, .6],
+  7: [.5, .55], 8: [.5, .55], 9: [.38, .5], 10: [.45, .55], 11: [.5, .5] };
+const PRE = {};
+async function init() {
+  await Promise.all(Array.from({ length: 11 }, (_, i) => new Promise(res => {
+    const im = new Image(); im.onload = () => { IMG[i + 1] = im; res(); };
+    im.src = `assets/p${String(i + 1).padStart(2, '0')}.jpg`;
+  })));
+  await Promise.all([document.fonts.load(`100px ${HAN}`), document.fonts.load(`100px ${BEBAS}`), document.fonts.load(`60px ${PEN}`)]);
+  PRE.grain = [];
+  for (let g = 0; g < 6; g++) {
+    const c = mk(480, 270), x = c.getContext('2d'), d = x.createImageData(480, 270);
+    for (let i = 0; i < d.data.length; i += 4) { const v = hash(g * 1e5 + i) * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+    x.putImageData(d, 0, 0); PRE.grain.push(c);
+  }
+  PRE.buf = mk(W, H);
+}
+
+/* ---------- beat helpers ---------- */
+const beatPhase = t => ((t % BEAT) + BEAT) % BEAT;
+const pulse = (t, k = 0.1) => Math.exp(-beatPhase(t) / k);          // 1 on every beat → 0
+const beatIdx = t => Math.floor(t / BEAT + 1e-6);
+
+/* ---------- drawing helpers ---------- */
+function cover(x, img, dx, dy, dw, dh, fx = .5, fy = .5, zoom = 1) {
+  const iw = img.width, ih = img.height, s = Math.max(dw / iw, dh / ih) * zoom;
+  const sw = dw / s, sh = dh / s;
+  const sx = clamp(fx * iw - sw / 2, 0, iw - sw), sy = clamp(fy * ih - sh / 2, 0, ih - sh);
+  x.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+// full-bleed photo with a zoom/pan move. o = {z:[z0,z1], f:[[fx0,fy0],[fx1,fy1]]}
+function full(i, p, o = {}) {
+  const z = o.z || [1.05, 1.15], f = o.f || [FOCUS[i], FOCUS[i]], e = E.inOutSine(p);
+  cover(ctx, IMG[i], 0, 0, W, H, lerp(f[0][0], f[1][0], e), lerp(f[0][1], f[1][1], e), lerp(z[0], z[1], e));
+}
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+// photo print with white border + drop shadow, centred at (cx,cy)
+function card(i, cx, cy, w, h, rot = 0, s = 1, o = {}) {
+  const b = o.border ?? 16;
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(rot); ctx.scale(s, s);
+  ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 18;
+  ctx.fillStyle = '#fff'; ctx.fillRect(-w / 2 - b, -h / 2 - b, w + 2 * b, h + 2 * b);
+  ctx.shadowColor = 'transparent';
+  cover(ctx, IMG[i], -w / 2, -h / 2, w, h, FOCUS[i][0], FOCUS[i][1], o.z || 1);
+  ctx.restore();
+}
+// slide-in from offscreen with overshoot
+const slideIn = (t, t0, d = 0.35) => E.outBack(prog(t, t0, t0 + d), 1.4);
+
+/* ---------- backgrounds ---------- */
+function stripes(c1, c2, t, w = 90, speed = 120) {
+  ctx.fillStyle = c1; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.rotate(-0.5); ctx.fillStyle = c2;
+  const off = (t * speed) % (w * 2);
+  for (let x = -1600 - off; x < 1600; x += w * 2) ctx.fillRect(x, -1300, w, 2600);
+  ctx.restore();
+}
+function dots(bg, col, t, gap = 64) {
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = col; const off = (t * 40) % gap;
+  for (let y = -gap; y < H + gap; y += gap) for (let x = -gap; x < W + gap; x += gap) {
+    const r = 6 + 4 * Math.sin((x + y) * 0.004 + t * 2);
+    ctx.beginPath(); ctx.arc(x + off + ((y / gap) % 2) * gap / 2, y + off * 0.5, r, 0, TAU); ctx.fill();
+  }
+}
+function waves(t) {
+  ctx.fillStyle = C.ocean; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 10; ctx.lineCap = 'round';
+  for (let k = 0; k < 9; k++) {
+    const y0 = 60 + k * 130;
+    ctx.beginPath();
+    for (let x = -40; x <= W + 40; x += 20) {
+      const y = y0 + Math.sin(x * 0.012 + t * 3 + k) * 22;
+      x === -40 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+/* ---------- type ---------- */
+// big word that slams in (scale 2.4 → 1) with a coloured block shadow
+function slam(str, x, y, t, t0, o = {}) {
+  const t1 = o.t1 ?? 99;
+  const p = prog(t, t0, t0 + (o.d || 0.2)), out = 1 - prog(t, t1 - 0.12, t1);
+  if (p <= 0 || out <= 0) return;
+  const s = lerp(o.from || 2.4, 1, E.outBack(p, 2.2)) * (1 + (o.beat ? 0.05 * pulse(t) : 0));
+  ctx.save(); ctx.translate(x, y); ctx.rotate(o.rot || 0); ctx.scale(s, s);
+  ctx.globalAlpha = clamp(p * 4) * out;
+  ctx.font = `${o.size || 160}px ${o.font || BEBAS}`; ctx.textAlign = o.align || 'center'; ctx.textBaseline = 'middle';
+  if (o.letter) ctx.letterSpacing = o.letter + 'px';
+  const sh = o.shadowOff ?? 10;
+  if (sh) { ctx.fillStyle = o.shadow || C.ink; ctx.fillText(str, sh, sh); }
+  if (o.stroke) { ctx.lineWidth = o.strokeW || 12; ctx.strokeStyle = o.stroke; ctx.lineJoin = 'round'; ctx.strokeText(str, 0, 0); }
+  ctx.fillStyle = o.color || C.white; ctx.fillText(str, 0, 0);
+  ctx.restore();
+}
+// word built letter-by-letter on 16th notes
+function slamLetters(str, x, y, t, t0, o = {}) {
+  ctx.save(); ctx.font = `${o.size || 160}px ${o.font || BEBAS}`; if (o.letter) ctx.letterSpacing = o.letter + 'px';
+  const chars = [...str], ws = chars.map(c => ctx.measureText(c).width), tw = ws.reduce((a, b) => a + b, 0);
+  ctx.restore();
+  let cx = (o.align === 'left' ? x : x - tw / 2);
+  chars.forEach((c, k) => { slam(c, cx + ws[k] / 2, y, t, t0 + k * (o.step ?? BEAT / 4), { ...o, align: 'center' }); cx += ws[k]; });
+}
+// a line of words laid out by measured width, centred on x; ws = [{s, t0, ...slam opts}]
+function slamRow(ws, x, y, t, o = {}) {
+  const gap = o.gap ?? 50;
+  ctx.save(); ctx.font = `${o.size || 160}px ${o.font || BEBAS}`; if (o.letter) ctx.letterSpacing = o.letter + 'px';
+  const wd = ws.map(w => ctx.measureText(w.s).width), tw = wd.reduce((a, b) => a + b, 0) + gap * (ws.length - 1);
+  ctx.restore();
+  let cx = x - tw / 2;
+  ws.forEach((w, k) => {
+    const opt = { ...o, ...w, align: 'center' };
+    w.letters ? slamLetters(w.s, cx + wd[k] / 2, y, t, w.t0, opt) : slam(w.s, cx + wd[k] / 2, y, t, w.t0, opt);
+    cx += wd[k] + gap;
+  });
+}
+// rounded label that stretches open, then reveals its text
+function pill(str, x, y, t, t0, o = {}) {
+  const t1 = o.t1 ?? 99, size = o.size || 64;
+  const p = E.outExpo(prog(t, t0, t0 + 0.35)), out = 1 - prog(t, t1 - 0.15, t1);
+  if (p <= 0 || out <= 0) return;
+  ctx.save(); ctx.font = `${size}px ${o.font || HAN}`;
+  const tw = ctx.measureText(str).width, padX = size * 0.55, w = (tw + padX * 2) * p, h = size * 1.45;
+  const ax = o.align === 'left' ? x : o.align === 'right' ? x - w : x - w / 2;
+  ctx.globalAlpha = out; ctx.translate(0, (1 - out) * 20);
+  ctx.translate(ax + w / 2, y); ctx.rotate(o.rot || 0); ctx.translate(-(ax + w / 2), -y);
+  ctx.fillStyle = o.shadow || C.ink; rrect(ax + 8, y - h / 2 + 8, w, h, h / 2); ctx.fill();
+  ctx.fillStyle = o.bg || C.sun; rrect(ax, y - h / 2, w, h, h / 2); ctx.fill();
+  ctx.beginPath(); ctx.rect(ax, y - h, w, h * 2); ctx.clip();
+  ctx.fillStyle = o.fg || C.ink; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.globalAlpha = out * prog(t, t0 + 0.1, t0 + 0.25);
+  ctx.fillText(str, ax + padX, y + size * 0.04);
+  ctx.restore();
+}
+// handwritten note — revealed left→right like a marker stroke
+function pen(str, x, y, t, t0, o = {}) {
+  const t1 = o.t1 ?? 99, out = 1 - prog(t, t1 - 0.15, t1);
+  if (t < t0 || out <= 0) return;
+  const size = o.size || 80;
+  ctx.save(); ctx.font = `${size}px ${PEN}`; ctx.textAlign = 'left';
+  const w = ctx.measureText(str).width;
+  const ax = o.align === 'center' ? x - w / 2 : o.align === 'right' ? x - w : x;
+  const p = E.inOutSine(prog(t, t0, t0 + (o.dur || 0.5)));
+  ctx.translate(ax, y); ctx.rotate(o.rot ?? -0.04);
+  ctx.beginPath(); ctx.rect(-10, -size, (w + 20) * p, size * 1.5); ctx.clip();
+  ctx.globalAlpha = out;
+  ctx.lineWidth = size * 0.14; ctx.lineJoin = 'round'; ctx.strokeStyle = o.stroke || C.ink; ctx.strokeText(str, 0, 0);
+  ctx.fillStyle = o.color || C.white; ctx.fillText(str, 0, 0);
+  ctx.restore();
+}
+// spinning starburst sticker with a label
+function burst(x, y, r, col, label, t, t0, o = {}) {
+  const t1 = o.t1 ?? 99, p = E.outBack(prog(t, t0, t0 + 0.3), 2.5), out = 1 - prog(t, t1 - 0.12, t1);
+  if (p <= 0 || out <= 0) return;
+  ctx.save(); ctx.translate(x, y); ctx.scale(p * (1 + 0.06 * pulse(t)), p * (1 + 0.06 * pulse(t))); ctx.globalAlpha = out;
+  ctx.save(); ctx.rotate(t * 0.8);
+  const n = 14;
+  ctx.beginPath();
+  for (let k = 0; k < n * 2; k++) { const a = k / (n * 2) * TAU, rr = k % 2 ? r * 0.8 : r; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fillStyle = C.ink; ctx.save(); ctx.translate(6, 6); ctx.fill(); ctx.restore();
+  ctx.fillStyle = col; ctx.fill(); ctx.restore();
+  ctx.rotate(o.rot || -0.15); ctx.fillStyle = o.fg || C.ink; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = `${o.size || r * 0.42}px ${o.font || BEBAS}`; ctx.fillText(label, 0, 4);
+  ctx.restore();
+}
+function star(x, y, r, col, a = 1, rot = 0) {
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.rotate(rot); ctx.fillStyle = col; ctx.beginPath();
+  for (let k = 0; k < 8; k++) { const ang = k / 8 * TAU, rr = k % 2 ? r * 0.38 : r; ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr); }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function sparkles(t, t0, pts, col = C.sun) {
+  pts.forEach(([x, y, r], k) => {
+    const p = prog(t, t0 + k * BEAT / 2, t0 + k * BEAT / 2 + 0.3);
+    if (p <= 0) return;
+    const s = E.outBack(p, 3) * (0.8 + 0.2 * Math.sin(t * 9 + k));
+    star(x, y, r * s, col, 1, t * 1.5 + k);
+  });
+}
+function heart(x, y, s, col, a = 1) {
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.scale(s, s); ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(0, 6); ctx.bezierCurveTo(-14, -6, -8, -18, 0, -10); ctx.bezierCurveTo(8, -18, 14, -6, 0, 6); ctx.fill();
+  ctx.restore();
+}
+// confetti burst launched at t0 from (x0,y0)
+function confetti(t, t0, x0, y0, n = 140) {
+  const dt = t - t0; if (dt < 0 || dt > 4) return;
+  const cols = [C.sun, C.coral, C.mint, C.ocean, C.white];
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (hash(i) - 0.5) * 2.4, v = 900 + hash(i + 3) * 1300;
+    const drag = Math.min(dt, 0.6);
+    const x = x0 + Math.cos(a) * v * drag + Math.sin(dt * 3 + i) * 30 * dt;
+    const y = y0 + Math.sin(a) * v * drag + 520 * Math.max(0, dt - 0.25) ** 2 + 160 * dt;
+    if (y > H + 40) continue;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(dt * (4 + hash(i + 7) * 6) + i);
+    ctx.scale(1, Math.cos(dt * 8 + i)); ctx.fillStyle = cols[i % cols.length];
+    ctx.fillRect(-9, -5, 18, 10); ctx.restore();
+  }
+}
+
+/* =========================================================
+   SHOTS — hard cuts on the beat; draw(t, p) paints a frame
+   ========================================================= */
+const B = n => n * BAR;
+const SHOTS = [
+  { s: 0, e: B(2), draw: introShot },
+  { s: B(2), e: B(4), draw: titleShot },
+  { s: B(4), e: B(5), draw: vShot },
+  { s: B(5), e: B(6), draw: (t, p) => { full(5, p, { z: [1.25, 1.08], f: [[.45, .6], [.5, .55]] });
+      pill('간식 타임!', 120, 190, t, B(5) + 0.05, { size: 84, bg: C.sun, align: 'left', rot: -0.04 });
+      burst(1700, 190, 120, C.coral, 'YUM!', t, B(5) + 0.5, { fg: C.white });
+      pen('빵 한 입, 주스 쭈욱~', 140, 950, t, B(5) + 1.0, { size: 96 }); } },
+  { s: B(6), e: B(7), draw: breadShot },
+  { s: B(7), e: B(9), draw: coolShot },
+  { s: B(9), e: B(10), draw: sandPairShot },
+  { s: B(10), e: B(11), draw: (t, p) => { full(10, p, { z: [1.22, 1.05], f: [[.5, .62], [.45, .55]] });
+      pill('모래놀이 삼매경', W / 2, 140, t, B(10) + 0.05, { size: 76, bg: C.mint });
+      pen('둘이 함께라서 더 재밌어!', W / 2, 980, t, B(10) + 0.6, { size: 92, align: 'center', rot: -0.02 });
+      const hp = E.outBack(prog(t, B(10) + 1.3, B(10) + 1.6), 3);
+      if (hp > 0) heart(1560, 920, 4.2 * hp * (1 + 0.1 * pulse(t)), C.coral); } },
+  { s: B(11), e: B(12), draw: montageShot },
+  { s: B(12), e: B(14), draw: finaleShot },
+  { s: B(14), e: DUR + 1, draw: endShot },
+];
+// how each cut is dressed: whip pan, colour wipe or white flash
+const CUTS = [
+  { t: B(2), type: 'flash', k: 1 }, { t: B(4), type: 'whip', dir: 1 }, { t: B(5), type: 'wipe', cols: [C.sun, C.coral, C.ocean] },
+  { t: B(6), type: 'whip', dir: -1 }, { t: B(7), type: 'flash', k: 0.8 }, { t: B(9), type: 'wipe', cols: [C.mint, C.sun, C.coral] },
+  { t: B(10), type: 'whip', dir: 1 }, { t: B(11), type: 'flash', k: 0.7 }, { t: B(12), type: 'flash', k: 1 },
+  { t: B(14), type: 'wipe', cols: [C.ocean, C.mint, C.sun] },
+];
+
+function introShot(t, p) {
+  stripes(C.sun, '#FFDF6E', t);
+  // photo card bounces on every beat
+  const e = slideIn(t, 0.0, 0.5), bob = pulse(t, 0.12);
+  card(1, 1340, lerp(1500, 540, e) - bob * 14, 520, 780, -0.05 + Math.sin(t * 3) * 0.015, 1 + bob * 0.025);
+  sparkles(t, 1.0, [[1020, 220, 34], [1660, 170, 26], [1690, 930, 30]], C.white);
+  pen('여행 가는 날 아침…', 140, 300, t, 0.25, { size: 96, t1: B(1) + 0.02 });
+  slam('준비됐어?', 560, 520, t, 0.9, { font: HAN, size: 170, color: C.ink, shadow: C.white, shadowOff: 8, t1: B(1) + 0.02 });
+  // countdown on bar 2: 3 · 2 · 1 · GO!
+  [['3', C.coral], ['2', C.ocean], ['1', C.mint]].forEach(([n, col], k) => {
+    const t0 = B(1) + k * BEAT;
+    if (t < t0 || t >= t0 + BEAT) return;
+    const r = 260 * E.outBack(prog(t, t0, t0 + 0.15), 2.5);
+    ctx.fillStyle = C.ink; ctx.beginPath(); ctx.arc(570, 560, r, 0, TAU); ctx.fill();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(560, 550, r, 0, TAU); ctx.fill();
+    slam(n, 560, 575, t, t0, { size: 400, from: 1.8, d: 0.15, shadowOff: 0 });
+  });
+  if (t >= B(1) + 3 * BEAT) {
+    const t0 = B(1) + 3 * BEAT;
+    slam("LET'S GO!", 560, 560, t, t0, { size: 300, color: C.coral, shadow: C.ink, shadowOff: 14, d: 0.15, rot: -0.06 });
+  }
+}
+function titleShot(t, p) {
+  const t0 = B(2);
+  full(4, p, { z: [1.3, 1.06], f: [[.5, .7], [.5, .6]] });
+  // sky tint so the type pops
+  const g = ctx.createLinearGradient(0, 0, 0, 600);
+  g.addColorStop(0, 'rgba(10,60,120,0.45)'); g.addColorStop(1, 'rgba(10,60,120,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, 600);
+  slamRow([{ s: 'SUMMER', t0, letters: true, shadow: C.coral }, { s: 'TRIP', t0: t0 + 2 * BEAT, letters: true, color: C.sun }],
+    W / 2, 250, t, { size: 330, letter: 8, shadowOff: 14, beat: true, gap: 70 });
+  pill('우리의 여름 여행', W / 2, 470, t, t0 + 1.0, { size: 72, bg: C.white, fg: C.ink, shadow: C.coral });
+  burst(1700, 840, 130, C.sun, 'GO!', t, t0 + 2.0);
+  pen('바다 보러 출발~!', 160, 920, t, t0 + 2.5, { size: 100 });
+}
+function vShot(t, p) {
+  const t0 = B(4);
+  dots(C.coral, 'rgba(255,255,255,0.18)', t);
+  const e1 = slideIn(t, t0, 0.3), e2 = slideIn(t, t0 + BEAT, 0.3);
+  const bob = pulse(t, 0.1);
+  card(2, 560, lerp(-700, 540, e1), 560, 840, -0.05 - bob * 0.01, 1 + bob * 0.02);
+  if (e2 > 0) card(3, 1360, lerp(1800, 540, e2), 560, 840, 0.05 + bob * 0.01, 1 + bob * 0.02);
+  slam('V', 960, 300, t, t0 + 2 * BEAT, { size: 360, color: C.sun, shadowOff: 14, beat: true, rot: -0.1 });
+  pill('브이 포즈는 필수!', W / 2, 920, t, t0 + 2 * BEAT, { size: 80, bg: C.sun });
+  sparkles(t, t0 + 3 * BEAT, [[230, 150, 40], [1700, 140, 46], [960, 560, 30]], C.white);
+}
+function breadShot(t, p) {
+  const t0 = B(6);
+  waves(t);
+  const e = slideIn(t, t0, 0.35), bob = pulse(t, 0.12);
+  card(6, 1330, 540 + (1 - e) * 900, 560, 840, 0.04 + Math.sin(t * 2.5) * 0.015, 1 + bob * 0.02, { z: 1.15 });
+  slam('냠.', 380, 330, t, t0 + BEAT, { font: HAN, size: 200, color: C.sun, shadowOff: 10, rot: -0.08 });
+  slam('냠!', 640, 520, t, t0 + 2 * BEAT, { font: HAN, size: 240, color: C.white, shadow: C.coral, shadowOff: 12, rot: 0.06 });
+  pen('바다 보며 먹는 빵 최고', 140, 820, t, t0 + 2.5 * BEAT, { size: 92, dur: 0.6 });
+}
+function coolShot(t, p) {
+  const t0 = B(7);
+  // stop-motion: the two bench frames swap on each beat, then on 8ths in the last half bar
+  const fast = t > t0 + 3 * BAR / 2 + BEAT;
+  const k = fast ? Math.floor((t - t0) / (BEAT / 2)) : beatIdx(t - t0);
+  const i = k % 2 ? 8 : 7;
+  const z = lerp(1.06, 1.22, E.inOutSine(p)) + 0.03 * pulse(t);
+  cover(ctx, IMG[i], 0, 0, W, H, .5, .58, z);
+  slamRow([{ s: 'COOL', t0, shadow: C.ocean, rot: -0.04 }, { s: 'KIDS', t0: t0 + BEAT, color: C.sun, rot: 0.04 }],
+    W / 2, 230, t, { size: 300, letter: 10, shadowOff: 14, beat: true, gap: 90 });
+  pill('선글라스 장착 완료', W / 2, 960, t, t0 + 2 * BEAT, { size: 72, bg: C.white, shadow: C.ocean, t1: t0 + BAR });
+  pill('바다 앞 패션쇼', W / 2, 960, t, t0 + BAR, { size: 72, bg: C.sun, shadow: C.coral });
+  sparkles(t, t0 + BAR, [[700, 520, 40], [1240, 470, 46], [1500, 380, 30], [420, 420, 34]], C.white);
+}
+function sandPairShot(t, p) {
+  const t0 = B(9);
+  stripes(C.mint, '#5BE6AB', t, 70, 160);
+  const e1 = slideIn(t, t0, 0.3), e2 = slideIn(t, t0 + BEAT, 0.3), bob = pulse(t, 0.1);
+  card(9, lerp(-500, 600, e1), 520, 560, 840, -0.06, 1 + bob * 0.02, { z: 1.1 });
+  if (e2 > 0) card(11, lerp(2400, 1320, e2), 540, 560, 840, 0.05, 1 + bob * 0.02, { z: 1.1 });
+  burst(960, 200, 120, C.sun, 'DIG!', t, t0 + 2 * BEAT);
+  pill('모래놀이 시작!', W / 2, 960, t, t0 + 2 * BEAT, { size: 80, bg: C.white, shadow: C.coral });
+}
+function montageShot(t, p) {
+  const t0 = B(11);
+  const order = [3, 7, 10, 5, 2, 6, 9, 4];
+  const k = clamp(Math.floor((t - t0) / (BEAT / 2)), 0, 7), i = order[k];
+  const lt = (t - t0) - k * BEAT / 2;
+  const z = 1.25 - 0.12 * E.outCubic(clamp(lt / 0.25));
+  cover(ctx, IMG[i], 0, 0, W, H, FOCUS[i][0], FOCUS[i][1], z);
+  // colour pop tint on each hit
+  const tint = [C.coral, C.ocean, C.sun, C.mint][k % 4];
+  ctx.save(); ctx.globalCompositeOperation = 'soft-light'; ctx.globalAlpha = 0.5 * Math.exp(-lt / 0.1);
+  ctx.fillStyle = tint; ctx.fillRect(0, 0, W, H); ctx.restore();
+  ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(0, 380, W, 320);
+  slamRow([{ s: 'SO', t0, shadow: C.coral }, { s: 'MUCH', t0: t0 + BEAT, color: C.sun }, { s: 'FUN!', t0: t0 + 2 * BEAT, shadow: C.ocean }],
+    W / 2, 540, t, { size: 300, beat: true, gap: 60 });
+}
+function finaleShot(t, p) {
+  const t0 = B(12);
+  full(8, p, { z: [1.25, 1.04], f: [[.5, .55], [.5, .5]] });
+  const g = ctx.createLinearGradient(0, 0, 0, 560);
+  g.addColorStop(0, 'rgba(10,50,110,0.5)'); g.addColorStop(1, 'rgba(10,50,110,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, 560);
+  slamRow([{ s: 'BEST', t0, shadow: C.coral }, { s: 'SUMMER', t0: t0 + BEAT, color: C.sun }, { s: 'EVER!', t0: t0 + 2 * BEAT, shadow: C.ocean }],
+    W / 2, 230, t, { size: 250, letter: 6, shadowOff: 14, beat: true, gap: 55 });
+  pen('안녕~ 또 만나자!', 110, 560, t, t0 + 1.6, { size: 92, rot: -0.08 });
+  pill('다음 여행도 같이 가자!', W / 2, 980, t, t0 + BAR, { size: 76, bg: C.sun });
+  confetti(t, t0, W / 2, H + 40);
+  confetti(t, t0 + BAR, 300, H + 40, 70);
+  confetti(t, t0 + BAR, W - 300, H + 40, 70);
+}
+function endShot(t, p) {
+  const t0 = B(14);
+  stripes(C.sun, '#FFDF6E', t);
+  // three round photo stickers pop in on the beat
+  [[7, 500, 0.0, C.coral], [4, 960, BEAT / 2, C.ocean], [10, 1420, BEAT, C.mint]].forEach(([i, x, d, col]) => {
+    const e = E.outBack(prog(t, t0 + d, t0 + d + 0.3), 2.2);
+    if (e <= 0) return;
+    const r = 200 * e * (1 + 0.04 * pulse(t));
+    ctx.save(); ctx.translate(x, 360);
+    ctx.fillStyle = C.ink; ctx.beginPath(); ctx.arc(8, 8, r + 14, 0, TAU); ctx.fill();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(0, 0, r + 14, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.clip();
+    cover(ctx, IMG[i], -r, -r, 2 * r, 2 * r, FOCUS[i][0], FOCUS[i][1] - 0.05, 1.6);
+    ctx.restore();
+  });
+  slam('우리의 여름, 최고였어!', W / 2, 720, t, t0 + 2 * BEAT, { font: HAN, size: 120, color: C.ink, shadow: C.white, shadowOff: 8 });
+  slam('SEE YOU ON THE NEXT TRIP', W / 2, 860, t, t0 + 3 * BEAT, { size: 80, letter: 10, color: C.coral, shadowOff: 0 });
+  const hp = E.outBack(prog(t, t0 + 4 * BEAT, t0 + 4 * BEAT + 0.3), 3);
+  if (hp > 0) { heart(W / 2 - 520, 860, 2.6 * hp, C.coral); heart(W / 2 + 520, 860, 2.6 * hp, C.coral); }
+}
+
+/* =========================================================
+   GLOBAL — transitions, camera punch/shake, grade, grain
+   ========================================================= */
+const shotAt = t => SHOTS.find(s => t >= s.s && t < s.e) || SHOTS[SHOTS.length - 1];
+function drawShot(s, t) { s.draw(t, clamp((t - s.s) / (s.e - s.s))); }
+function drawShotInto(s, t) {
+  const b = PRE.buf, bx = b.getContext('2d');
+  bx.setTransform(1, 0, 0, 1, 0, 0); bx.globalAlpha = 1; bx.clearRect(0, 0, W, H);
+  ctxSwap(bx, () => drawShot(s, t));
+  return b;
+}
+const WHIP = 0.16, WIPE = 0.28;
+function scene(t) {
+  const s = shotAt(t);
+  // whip pan: outgoing accelerates off, incoming decelerates in, with motion-blur smear
+  const wc = CUTS.find(c => c.type === 'whip' && Math.abs(t - c.t) < WHIP);
+  if (wc) {
+    const k = (t - wc.t) / WHIP;                     // -1 … 1
+    const off = (k < 0 ? -E.inCubic(1 + k) : E.inCubic(1 - k)) * W * 0.7 * wc.dir * (k < 0 ? 1 : -1);
+    const speed = Math.abs(off) * 0.25 + 40;
+    const b = drawShotInto(s, t);
+    ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
+    const N = 8;
+    for (let n = 0; n < N; n++) {
+      ctx.globalAlpha = 1 / (n + 1);
+      ctx.drawImage(b, off + (n / (N - 1) - 0.5) * speed * wc.dir, 0);
+    }
+    ctx.globalAlpha = 1;
+    return;
+  }
+  drawShot(s, t);
+}
+function overlays(t) {
+  for (const c of CUTS) {
+    if (c.type === 'flash') {
+      const d = t - c.t; if (d < -0.04 || d > 0.3) continue;
+      ctx.fillStyle = `rgba(255,255,255,${(d < 0 ? 1 + d / 0.04 : Math.exp(-d / 0.08)) * 0.9 * c.k})`; ctx.fillRect(0, 0, W, H);
+    } else if (c.type === 'wipe') {
+      const p = prog(t, c.t - WIPE, c.t + WIPE); if (p <= 0 || p >= 1) continue;
+      // three diagonal colour bands sweep across, fully covering the frame at the cut
+      ctx.save(); ctx.translate(W / 2, H / 2); ctx.rotate(-0.35);
+      c.cols.forEach((col, n) => {
+        const q = E.inOutCubic(clamp(p * 1.25 - n * 0.08));
+        const x = lerp(-2600, 2600, q) - n * 140;
+        ctx.fillStyle = col; ctx.fillRect(x - 1100 + n * 140, -1400, 2200 - n * 280, 2800);
+      });
+      ctx.restore();
+    }
+  }
+}
+function camera(t) {
+  // punch-in zoom + shake on cuts, gentle beat pulse through the groove
+  let z = 1, sx = 0, sy = 0;
+  for (const c of CUTS) {
+    const d = t - c.t; if (d < 0 || d > 0.6) continue;
+    const a = Math.exp(-d / 0.12);
+    z += 0.07 * a; sx += (hash(c.t * 7 + Math.floor(t * FPS)) - 0.5) * 30 * a; sy += (hash(c.t * 3 + Math.floor(t * FPS) + 9) - 0.5) * 30 * a;
+  }
+  if (t >= B(2) && t < B(14)) z += 0.012 * pulse(t, 0.09);
+  return { z, sx, sy };
+}
+function grade() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,200,120,0.18)'; ctx.fillRect(0, 0, W, H); // sunny mids
+  ctx.restore();
+}
+
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const cam = camera(t);
+  ctx.save(); ctx.translate(W / 2 + cam.sx, H / 2 + cam.sy); ctx.scale(cam.z * 1.02, cam.z * 1.02); ctx.translate(-W / 2, -H / 2);
+  scene(t);
+  ctx.restore();
+  overlays(t);
+  grade();
+  // soft vignette + light grain
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.5, W / 2, H / 2, H * 1.1);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.06;
+  ctx.drawImage(PRE.grain[Math.floor(t * FPS) % 6], 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  if (t > DUR - 0.8) { ctx.fillStyle = `rgba(0,0,0,${prog(t, DUR - 0.8, DUR - 0.05)})`; ctx.fillRect(0, 0, W, H); }
+}
+// temporarily route drawing helpers to another context
+function ctxSwap(other, fn) { const keep = ctx; ctx = other; try { fn(); } finally { ctx = keep; } }
+
+window.READY = init().then(() => { render(0); return true; });
+if (location.search.includes('play')) window.READY.then(() => {
+  const t0 = performance.now();
+  const loop = () => { render(((performance.now() - t0) / 1000) % DUR); requestAnimationFrame(loop); };
+  loop();
+});
+</script>
+</body>
+</html>
