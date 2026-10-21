@@ -1,0 +1,477 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Summer Trip</title>
+<style>
+  @font-face { font-family: 'BH'; src: url('fonts/BlackHanSans-Regular.ttf'); }
+  @font-face { font-family: 'Jua'; src: url('fonts/Jua-Regular.ttf'); }
+  html,body{margin:0;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script src="assets/captions.js"></script>
+<script>
+/* =========================================================
+   우리 가족 여름 여행 — upbeat summer travel film (40s)
+   Style: bright punchy grade · beat-synced cuts at 120 BPM
+   (beat 0.5s, bar 2s) · whip / zoom / flash / circle
+   transitions · sticker-style kinetic type · photo cards on
+   blurred beds · 3 video clips (one in 2× slow motion).
+   Personal captions come from git-ignored assets/captions.js
+   (window.CAPTIONS = { place, placeKo, endSub, title }).
+   ========================================================= */
+const W = 1920, H = 1080, FPS = 30, DUR = 40;
+const BEAT = 0.5, BAR = 2;
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');
+const C = { y: '#FFD23F', c: '#FF5E5B', a: '#00C2D1', n: '#14213D', w: '#FFFFFF', p: '#FF7EB6' };
+const T = { title: '우리 가족 여름 여행', place: 'SUMMER TRIP', placeKo: '바닷가', endSub: '사랑을 담아' };
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const TAU = Math.PI * 2;
+const E = {
+  inOutSine: x => -(Math.cos(Math.PI * x) - 1) / 2,
+  outCubic: x => 1 - Math.pow(1 - x, 3),
+  inCubic: x => x * x * x,
+  inOutCubic: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  outBack: (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2),
+  outExpo: x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x),
+};
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+/* ---------- assets ---------- */
+const IMG = [];
+const FOCUS = { 1: [.5, .4], 2: [.38, .5], 3: [.4, .45], 4: [.55, .45], 5: [.4, .38], 6: [.5, .55],
+  7: [.5, .55], 8: [.4, .55], 9: [.5, .45], 10: [.45, .42], 11: [.5, .4], 12: [.5, .45] };
+const VID = { 1: { n: 82, fps: 30 }, 2: { n: 185, fps: 30 }, 3: { n: 126, fps: 60 } };
+const PRE = { blur: [] };
+const load = src => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+async function init() {
+  await Promise.all(Array.from({ length: 12 }, (_, i) =>
+    load(`assets/p${String(i + 1).padStart(2, '0')}.jpg`).then(im => IMG[i + 1] = im)));
+  Object.assign(T, window.CAPTIONS || {});
+  await Promise.all([document.fonts.load('100px BH'), document.fonts.load('60px Jua')]);
+  for (let i = 1; i <= 12; i++) {
+    const b = mk(W / 4, H / 4), x = b.getContext('2d');
+    x.filter = 'blur(10px) saturate(1.3) brightness(0.8)';
+    cover(x, IMG[i], -20, -20, W / 4 + 40, H / 4 + 40, FOCUS[i][0], FOCUS[i][1], 1);
+    PRE.blur[i] = b;
+  }
+  PRE.vb = mk(W / 8, H / 8);
+  PRE.grain = [];
+  for (let g = 0; g < 6; g++) {
+    const c = mk(480, 270), x = c.getContext('2d'), d = x.createImageData(480, 270);
+    for (let i = 0; i < d.data.length; i += 4) { const v = hash(g * 1e5 + i) * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+    x.putImageData(d, 0, 0); PRE.grain.push(c);
+  }
+}
+/* video frames are JPEG sequences, loaded on demand around the playhead */
+const FR = new Map();
+function vidIdx(sh, t) { const v = sh.vid; return clamp(Math.floor((v.src0 + (t - sh.s) * v.speed) * VID[v.id].fps), 0, VID[v.id].n - 1); }
+function frame(sh, t) { return FR.get(`${sh.vid.id}/${vidIdx(sh, t)}`); }
+async function prep(t) {
+  const need = [];
+  for (const sh of SHOTS) if (sh.vid && t > sh.s - 0.5 && t < sh.e + 0.5) need.push(`${sh.vid.id}/${vidIdx(sh, t)}`);
+  await Promise.all(need.filter(k => !FR.has(k)).map(k => {
+    const [v, i] = k.split('/');
+    return load(`assets/v${v}/${String(+i + 1).padStart(3, '0')}.jpg`).then(im => FR.set(k, im));
+  }));
+  while (FR.size > 40) FR.delete(FR.keys().next().value);
+}
+
+/* ---------- drawing helpers ---------- */
+function cover(x, img, dx, dy, dw, dh, fx = .5, fy = .5, zoom = 1) {
+  const iw = img.width, ih = img.height, s = Math.max(dw / iw, dh / ih) * zoom;
+  const sw = dw / s, sh = dh / s;
+  const sx = clamp(fx * iw - sw / 2, 0, iw - sw), sy = clamp(fy * ih - sh / 2, 0, ih - sh);
+  x.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+function rrect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function kbFull(i, p, z0, z1, f0 = FOCUS[i], f1 = f0, ease = E.inOutSine) {
+  const e = ease(p);
+  cover(ctx, IMG[i], 0, 0, W, H, lerp(f0[0], f1[0], e), lerp(f0[1], f1[1], e), lerp(z0, z1, e));
+}
+function bed(i) { ctx.drawImage(PRE.blur[i], 0, 0, W, H); ctx.fillStyle = 'rgba(10,20,40,0.18)'; ctx.fillRect(0, 0, W, H); }
+function vbed(img) {
+  const x = PRE.vb.getContext('2d'); x.filter = 'blur(3px) saturate(1.3) brightness(0.8)';
+  cover(x, img, -4, -4, W / 8 + 8, H / 8 + 8, .5, .5, 1); x.filter = 'none';
+  ctx.imageSmoothingQuality = 'high'; ctx.drawImage(PRE.vb, 0, 0, W, H);
+  ctx.fillStyle = 'rgba(10,20,40,0.15)'; ctx.fillRect(0, 0, W, H);
+}
+// photo card: white border, rounded, drop shadow; pops in with outBack from enter time
+function card(img, cx, cy, h, o = {}) {
+  const asp = o.asp || img.width / img.height, w = h * asp, b = o.b ?? 16;
+  const lt = o.lt ?? 1, e = E.outBack(prog(lt, 0, o.in || 0.45), 1.6), a = clamp(lt / 0.12);
+  const rot = lerp(o.rot0 ?? (o.rot || 0) - 0.18, o.rot || 0, E.outCubic(prog(lt, 0, 0.5)));
+  const s = lerp(o.s0 ?? 0.55, 1, e);
+  ctx.save(); ctx.globalAlpha *= a; ctx.translate(cx, cy); ctx.rotate(rot); ctx.scale(s, s);
+  ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 50; ctx.shadowOffsetY = 18;
+  ctx.fillStyle = '#fff'; rrect(-w / 2 - b, -h / 2 - b, w + 2 * b, h + 2 * b, 26 + b); ctx.fill(); ctx.restore();
+  ctx.save(); rrect(-w / 2, -h / 2, w, h, 24); ctx.clip();
+  cover(ctx, img, -w / 2, -h / 2, w, h, o.fx ?? .5, o.fy ?? .5, o.z || 1);
+  ctx.restore(); ctx.restore();
+}
+/* sticker-style kinetic text: per-char pop (outBack), white outline, coloured drop shadow */
+function pop(str, x, y, t, t0, o = {}) {
+  const t1 = o.t1 ?? 1e9;
+  if (t < t0 || t > t1) return;
+  const size = o.size || 120, font = o.font || 'BH', st = o.st ?? 0.045;
+  ctx.save(); ctx.font = `${size}px ${font}`; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  const chars = [...str], ws = chars.map(c => ctx.measureText(c).width), tw = ws.reduce((a, b) => a + b, 0);
+  let cx = o.align === 'left' ? x : o.align === 'right' ? x - tw : x - tw / 2;
+  ctx.translate(x, y); ctx.rotate(o.rot || 0); ctx.translate(-x, -y);
+  chars.forEach((ch, k) => {
+    const p = prog(t, t0 + k * st, t0 + k * st + 0.32), q = prog(t, t1 - 0.22 + k * 0.02, t1 - 0.04 + k * 0.02);
+    const s = E.outBack(p, 2.4) * (1 - E.inCubic(q));
+    const mx = cx + ws[k] / 2; cx += ws[k];
+    if (s <= 0.001 || ch === ' ') return;
+    const jr = (hash(k * 7.3 + str.length) - 0.5) * 0.14 * (o.jitter ?? 1);
+    ctx.save(); ctx.translate(mx, y); ctx.rotate(jr + (1 - p) * 0.4); ctx.scale(s, s);
+    ctx.lineJoin = 'round';
+    if (o.shadow !== false) { ctx.fillStyle = o.shadow || C.n; ctx.fillText(ch, size * 0.05, size * 0.07); }
+    if (o.stroke !== false) { ctx.strokeStyle = o.stroke || (o.color === '#fff' ? C.n : '#fff'); ctx.lineWidth = size * 0.14; ctx.strokeText(ch, 0, 0); }
+    ctx.fillStyle = o.color || C.y; ctx.fillText(ch, 0, 0);
+    ctx.restore();
+  });
+  ctx.restore();
+}
+/* rounded pill tag that wipes in */
+function pill(str, x, y, t, t0, o = {}) {
+  const t1 = o.t1 ?? 1e9; if (t < t0 || t > t1) return;
+  const size = o.size || 44;
+  ctx.save(); ctx.font = `${size}px Jua`; ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(str).width, w = tw + size * 1.2, h = size * 1.55;
+  const p = E.outExpo(prog(t, t0, t0 + 0.4)) * (1 - E.inCubic(prog(t, t1 - 0.2, t1)));
+  const ax = o.align === 'center' ? x - w / 2 : x;
+  ctx.beginPath(); ctx.rect(ax - 10, y - h, w * p + 20, h * 2); ctx.clip();
+  ctx.translate(ax, y); ctx.rotate(o.rot || -0.03);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)'; rrect(6, -h / 2 + 8, w, h, h / 2); ctx.fill();
+  ctx.fillStyle = o.bg || C.y; rrect(0, -h / 2, w, h, h / 2); ctx.fill();
+  ctx.fillStyle = o.fg || C.n; ctx.fillText(str, size * 0.6, 2);
+  ctx.restore();
+}
+// comic burst lines behind a pop word
+function burst(x, y, t, t0, col = C.y, r0 = 120, r1 = 330) {
+  const p = prog(t, t0, t0 + 0.45); if (p <= 0 || p >= 1) return;
+  ctx.save(); ctx.strokeStyle = col; ctx.lineCap = 'round'; ctx.lineWidth = 14 * (1 - p);
+  for (let k = 0; k < 14; k++) {
+    const a = k / 14 * TAU + hash(k + t0) * 0.2, ra = lerp(r0, r1, E.outCubic(p)), rb = ra + 80 * (1 - p);
+    ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * ra, y + Math.sin(a) * ra); ctx.lineTo(x + Math.cos(a) * rb, y + Math.sin(a) * rb); ctx.stroke();
+  }
+  ctx.restore();
+}
+// water droplets thrown up and falling
+function splash(x, y, t, t0, n = 40, spread = 520) {
+  const lt = t - t0; if (lt < 0 || lt > 1.4) return;
+  ctx.save();
+  for (let k = 0; k < n; k++) {
+    const ang = -Math.PI / 2 + (hash(k + 1) - 0.5) * 2.4, sp = 500 + hash(k + 9) * 900;
+    const px = x + Math.cos(ang) * sp * lt * (spread / 520), py = y + Math.sin(ang) * sp * lt + 1400 * lt * lt;
+    const r = 6 + hash(k + 3) * 14, a = 1 - lt / 1.4;
+    ctx.fillStyle = `rgba(${k % 3 ? '220,248,255' : '120,225,255'},${a})`;
+    ctx.beginPath(); ctx.arc(px, py, r, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+function bubbles(x0, x1, t, t0, t1) {
+  if (t < t0 || t > t1 + 1) return;
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 4;
+  for (let k = 0; k < 26; k++) {
+    const born = t0 + hash(k) * (t1 - t0), lt = t - born; if (lt < 0 || lt > 1.6) continue;
+    const x = lerp(x0, x1, hash(k + 4)) + Math.sin(lt * 6 + k) * 18, y = 1000 - lt * 520 * (0.7 + hash(k + 8) * 0.6);
+    const r = 8 + hash(k + 2) * 22;
+    ctx.globalAlpha = 1 - lt / 1.6; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x - r * 0.35, y - r * 0.35, r * 0.2, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
+  }
+  ctx.restore();
+}
+function petals(t, t0, col = '#FFB3D1') {
+  ctx.save();
+  for (let k = 0; k < 24; k++) {
+    const sp = 120 + hash(k) * 160, lt = t - t0 + hash(k + 5) * 6;
+    const x = (hash(k + 2) * W + Math.sin(lt * 1.3 + k) * 60 - lt * 60) % W, y = (lt * sp) % (H + 100) - 50;
+    ctx.save(); ctx.translate((x + W) % W, y); ctx.rotate(lt * 2 + k); ctx.globalAlpha = 0.85;
+    ctx.fillStyle = k % 3 ? col : '#C9B6FF'; ctx.beginPath(); ctx.ellipse(0, 0, 14, 8, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+function confetti(t, t0) {
+  const cols = [C.y, C.c, C.a, C.p, '#fff'];
+  ctx.save();
+  for (let k = 0; k < 90; k++) {
+    const lt = t - t0 - hash(k + 1) * 1.2; if (lt < 0) continue;
+    const x = hash(k + 3) * W + Math.sin(lt * 2 + k) * 50, y = -40 + lt * (220 + hash(k + 7) * 220);
+    if (y > H + 40) continue;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(lt * (3 + hash(k) * 4)); ctx.scale(1, Math.cos(lt * 5 + k));
+    ctx.fillStyle = cols[k % 5]; ctx.fillRect(-9, -5, 18, 10); ctx.restore();
+  }
+  ctx.restore();
+}
+function speedLines(x, y, t, t0, t1, dir = 1) {
+  if (t < t0 || t > t1) return;
+  const p = prog(t, t0, t1);
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineCap = 'round';
+  for (let k = 0; k < 9; k++) {
+    const yy = y + (k - 4) * 34, off = (p * 900 + hash(k) * 300) * dir, len = 120 + hash(k + 2) * 200;
+    ctx.lineWidth = 3 + hash(k + 5) * 6; ctx.globalAlpha = Math.sin(Math.PI * p);
+    ctx.beginPath(); ctx.moveTo(x + off, yy); ctx.lineTo(x + off + len * dir, yy); ctx.stroke();
+  }
+  ctx.restore();
+}
+function wave(x0, x1, y, t, t0, col = C.a) {
+  const p = E.inOutSine(prog(t, t0, t0 + 0.6)); if (p <= 0) return;
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = 12; ctx.lineCap = 'round'; ctx.beginPath();
+  for (let x = x0; x <= lerp(x0, x1, p); x += 6) { const yy = y + Math.sin((x - x0) / 45 + t * 6) * 16; x === x0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
+  ctx.stroke(); ctx.restore();
+}
+function dots(col, t) {
+  ctx.save(); ctx.fillStyle = col;
+  for (let y = 0; y < H + 60; y += 60) for (let x = 0; x < W + 60; x += 60) {
+    ctx.beginPath(); ctx.arc(x + ((y / 60) % 2) * 30 + (t * 30) % 60, y, 6, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* =========================================================
+   SHOTS — [s, e) on the beat grid; draw(t, lt, p) paints a frame.
+   tr = transition INTO this shot.
+   ========================================================= */
+const SHOTS = [
+  { s: 0, e: 4, draw: titleShot },
+  { s: 4, e: 6, tr: 'zoom', draw: (t, lt) => {
+      bed(1);
+      card(IMG[1], 1270, 545, 900, { lt, rot: 0.035, ...fz(1), z: lerp(1, 1.08, lt / 2) });
+      pill('#' + T.placeKo + ' 바다', 230, 330, t, 4.15, { bg: C.a, fg: '#fff' });
+      pop('바다다!', 230, 520, t, 4.3, { size: 190, align: 'left', color: C.y });
+      pop('파도 소리 들려?', 240, 680, t, 4.9, { size: 66, font: 'Jua', align: 'left', color: '#fff', shadow: C.a, st: 0.03 });
+      wave(240, 760, 780, t, 5.2);
+    } },
+  { s: 6, e: 8, tr: 'whipL', draw: (t, lt) => {
+      kbFull(2, lt / 2, 1.04, 1.28, [.4, .5], [.36, .45]);
+      pop('하나, 둘…', 140, 200, t, 6.1, { size: 84, font: 'Jua', align: 'left', color: '#fff', shadow: C.n });
+      burst(1400, 360, t, 6.7, C.y);
+      pop('던져라!', 1400, 360, t, 6.6, { size: 210, color: C.c, rot: -0.06 });
+      speedLines(760, 330, t, 6.6, 7.4);
+    } },
+  { s: 8, e: 12, tr: 'flash', vid: { id: 3, src0: 0, speed: 0.5 }, draw: (t, lt, p, sh) => {
+      const f = frame(sh, t); if (f) cover(ctx, f, 0, 0, W, H, .5, .5, lerp(1.02, 1.12, E.inOutSine(p)));
+      // camcorder overlay
+      ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 5;
+      [[90, 90, 1, 1], [W - 90, 90, -1, 1], [90, H - 90, 1, -1], [W - 90, H - 90, -1, -1]].forEach(([x, y, a, b]) => {
+        ctx.beginPath(); ctx.moveTo(x, y + 60 * b); ctx.lineTo(x, y); ctx.lineTo(x + 60 * a, y); ctx.stroke(); });
+      if (Math.floor(t * 2) % 2 === 0) { ctx.fillStyle = '#FF3B30'; ctx.beginPath(); ctx.arc(150, 150, 14, 0, TAU); ctx.fill(); }
+      ctx.font = '40px Jua'; ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText('SLOW MOTION  ×2', 180, 152);
+      ctx.restore();
+      pop('돌멩이 발사!', 1500, 240, t, 8.5, { size: 110, color: '#fff', shadow: C.a, t1: 10.9 });
+      splash(1500, 760, t, 11.05, 46);
+      burst(1350, 520, t, 11.1, C.a);
+      pop('퐁당!', 1350, 520, t, 11.05, { size: 230, color: C.a, shadow: C.n, rot: 0.05 });
+    } },
+  { s: 12, e: 14, tr: 'up', draw: (t, lt) => {
+      ctx.fillStyle = C.a; ctx.fillRect(0, 0, W, H); dots('rgba(255,255,255,0.25)', t);
+      const pw = W / 2;
+      [[3, 0, -1, 12.0], [4, pw, 1, 12.25]].forEach(([i, x, dir, t0]) => {
+        const e = E.outExpo(prog(t, t0, t0 + 0.55));
+        ctx.save(); ctx.beginPath(); ctx.rect(x + 14, 14, pw - 28, H - 28); ctx.clip();
+        ctx.translate(0, (1 - e) * H * dir);
+        cover(ctx, IMG[i], x + 14, 14, pw - 28, H - 28, FOCUS[i][0], FOCUS[i][1], 1.02 + lt * 0.03);
+        ctx.restore();
+      });
+      pop('뽀로로랑', 480, 150, t, 12.55, { size: 120, color: C.y, rot: -0.06 });
+      burst(1440, 930, t, 13.0, '#fff');
+      pop('찰칵!', 1440, 930, t, 13.0, { size: 150, color: C.c, rot: 0.06 });
+    } },
+  { s: 14, e: 16, tr: 'zoom', draw: (t, lt) => {
+      bed(5);
+      petals(t, 14);
+      card(IMG[5], 640, 545, 900, { lt, rot: -0.035, ...fz(5), z: lerp(1, 1.07, lt / 2) });
+      pill('#수국길', 1130, 330, t, 14.15, { bg: C.p, fg: '#fff' });
+      pop('수국 요정', 1120, 520, t, 14.35, { size: 170, align: 'left', color: C.p });
+      pop('꽃보다 예쁜 미소', 1130, 680, t, 14.9, { size: 66, font: 'Jua', align: 'left', color: '#fff', shadow: C.p, st: 0.03 });
+    } },
+  { s: 16, e: 18, tr: 'whipR', draw: (t, lt) => {
+      // stepped beat-zoom toward the face
+      const n = Math.min(3, Math.floor(lt / BEAT)), zs = [1.0, 1.16, 1.34, 1.55];
+      const z = lerp(n ? zs[n - 1] : zs[0], zs[n], E.outExpo(prog(lt - n * BEAT, 0, 0.14)));
+      cover(ctx, IMG[10], 0, 0, W, H, .45, lerp(.5, .4, n / 3), z);
+      pop('V', 320, 300, t, 16.0, { size: 260, color: C.a, rot: -0.2 });
+      pop('V', 1600, 300, t, 16.5, { size: 260, color: C.c, rot: 0.2 });
+      pop('브이~!', 1500, 850, t, 17.0, { size: 190, color: C.y, rot: -0.05 });
+    } },
+  { s: 18, e: 20, tr: 'flash', draw: (t, lt) => {
+      kbFull(9, lt / 2, 1.38, 1.0, [.5, .42], [.5, .5], E.outCubic);
+      pop('거인 의자 등장!', W / 2, 170, t, 18.3, { size: 130, color: '#fff', shadow: C.c });
+      pill('아빠 최고!', 140, 950, t, 19.0, { size: 56, bg: C.y, fg: C.n });
+    } },
+  { s: 20, e: 22, tr: 'whipL', draw: (t, lt) => {
+      const st = prog(t, 21, 21.75), shake = st > 0 ? Math.sin(t * 90) * 10 * st : 0;
+      ctx.save(); ctx.translate(shake, 0);
+      kbFull(8, lt / 2, 1.08 + st * 0.25, 1.2 + st * 0.25, [.25, .6], [.75, .45]);
+      ctx.restore();
+      ctx.fillStyle = `rgba(10,20,40,${0.25 + st * 0.45})`; ctx.fillRect(0, 0, W, H);
+      // typewriter question
+      const q = '다음은 어디로…?', nch = Math.floor(clamp((t - 20.25) / 0.07, 0, [...q].length));
+      if (t < 21) { ctx.save(); ctx.font = '96px Jua'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#fff'; ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 20;
+        ctx.fillText([...q].slice(0, nch).join(''), W / 2, 900); ctx.restore(); }
+      ['3', '2', '1'].forEach((d, k) => pop(d, W / 2, H / 2, t, 21 + k * 0.25, { size: 360, color: [C.y, C.c, C.a][k], t1: 21.22 + k * 0.25 + (k === 2 ? 0.28 : 0) }));
+    } },
+  { s: 22, e: 25, tr: 'flash', vid: { id: 1, src0: 0, speed: 1 }, draw: (t, lt, p, sh) => {
+      const f = frame(sh, t); if (!f) return;
+      vbed(f);
+      card(f, 960, 540, 960, { lt, b: 12, s0: 1.4, rot0: 0, rot: 0 });
+      pop('물놀이 타임!', W / 2, H / 2, t, 22.0, { size: 210, color: C.y, t1: 22.95, st: 0.03 });
+      pop('상어 입으로', 330, 430, t, 23.0, { size: 74, font: 'Jua', color: '#fff', shadow: C.a });
+      pop('슝~', 330, 600, t, 23.3, { size: 200, color: C.a, rot: -0.08 });
+      splash(960, 900, t, 24.0, 50, 900);
+      burst(1590, 560, t, 24.0, C.c);
+      pop('첨벙!', 1590, 560, t, 24.0, { size: 210, color: C.c, rot: 0.08 });
+    } },
+  { s: 25, e: 30, tr: 'whipR', vid: { id: 2, src0: 0.8, speed: 1 }, draw: (t, lt, p, sh) => {
+      const f = frame(sh, t); if (!f) return;
+      vbed(f);
+      card(f, 600, 540, 960, { lt, b: 12, rot: -0.025 });
+      pill('#수영왕', 1110, 300, t, 25.2, { bg: C.a, fg: '#fff' });
+      pop('잠수 시작!', 1340, 470, t, 25.5, { size: 140, color: '#fff', shadow: C.a, t1: 29.05 });
+      bubbles(1000, 1750, t, 26.0, 29.0);
+      pop('보글보글…', 1340, 640, t, 26.4, { size: 84, font: 'Jua', color: C.a, shadow: C.n, t1: 29.05 });
+      burst(1340, 560, t, 29.15, C.y);
+      pop('푸하!', 1340, 560, t, 29.1, { size: 250, color: C.y, rot: -0.05 });
+    } },
+  { s: 30, e: 32, tr: 'zoom', draw: (t, lt) => {
+      ctx.fillStyle = C.y; ctx.fillRect(0, 0, W, H);
+      ctx.save(); ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      for (let k = -4; k < 30; k++) { const x = k * 120 + (t * 80) % 120; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 60, 0); ctx.lineTo(x + 60 - 600, H); ctx.lineTo(x - 600, H); ctx.fill(); }
+      ctx.restore();
+      card(IMG[11], 560, 560, 860, { lt, rot: -0.05, ...fz(11) });
+      card(IMG[12], 1360, 525, 860, { lt: lt - 0.5, rot: 0.045, ...fz(12) });
+      pop('쿨~', 290, 190, t, 30.3, { size: 150, color: C.a, rot: -0.18 });
+      pop('냠냠', 1680, 170, t, 30.8, { size: 150, color: C.c, rot: 0.14 });
+    } },
+  { s: 32, e: 34, tr: 'flash', draw: (t, lt) => {
+      const list = [1, 2, 5, 10, 9, 3, 8, 4], k = Math.min(7, Math.floor(lt / 0.25)), q = lt - k * 0.25;
+      cover(ctx, IMG[list[k]], 0, 0, W, H, FOCUS[list[k]][0], FOCUS[list[k]][1], lerp(1.18, 1.05, E.outCubic(q / 0.25)));
+      if (q < 0.06) { ctx.fillStyle = `rgba(255,255,255,${0.35 * (1 - q / 0.06)})`; ctx.fillRect(0, 0, W, H); }
+      ctx.fillStyle = 'rgba(10,20,40,0.3)'; ctx.fillRect(0, 0, W, H);
+      pop('BEST', W / 2, 440, t, 32.05, { size: 230, color: C.y, st: 0.06 });
+      pop('MOMENTS', W / 2, 650, t, 32.3, { size: 170, color: '#fff', shadow: C.c, st: 0.05 });
+    } },
+  { s: 34, e: DUR + 1, tr: 'circle', draw: (t, lt) => {
+      bed(6);
+      if (t > 35.1) confetti(t, 35.1);
+      const e = E.inOutCubic(prog(lt, 0, 1.3));
+      card(IMG[6], 960, 540, lerp(1500, 900, e), { b: 16 * e, rot: lerp(0, 0.02, e), fx: .5, fy: lerp(.42, .5, e), z: lerp(1.25, 1, e) });
+      pop('우리 가족', 330, 470, t, 35.3, { size: 130, color: '#fff', shadow: C.c });
+      pop('여름 여행', 1590, 470, t, 35.6, { size: 130, color: C.y });
+      pop('함께라서 최고!', 330, 610, t, 36.1, { size: 62, font: 'Jua', color: C.y, shadow: C.n, st: 0.03 });
+      pop(T.endSub, 1590, 610, t, 36.4, { size: 54, font: 'Jua', color: '#fff', shadow: C.n, st: 0.03 });
+    } },
+];
+function fz(i) { return { fx: FOCUS[i][0], fy: FOCUS[i][1] }; }
+
+function titleShot(t, lt) {
+  ctx.fillStyle = C.n; ctx.fillRect(0, 0, W, H);
+  // circle reveal echoing the moon-window frame
+  const r = E.outCubic(prog(t, 0.35, 1.3)) * 1150;
+  if (r > 0) {
+    ctx.save(); ctx.beginPath(); ctx.arc(W / 2, H / 2, r, 0, TAU); ctx.clip();
+    cover(ctx, IMG[7], 0, 0, W, H, .5, .55, lerp(1.45, 1.08, E.outCubic(prog(t, 0.35, 4))));
+    ctx.fillStyle = 'rgba(10,20,40,0.22)'; ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+    ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 14 * (1 - prog(t, 1.0, 1.3)); ctx.beginPath(); ctx.arc(W / 2, H / 2, r, 0, TAU); ctx.stroke(); ctx.restore();
+  }
+  // three colour bands sweep across
+  [C.y, C.c, C.a].forEach((col, k) => {
+    const x = lerp(-900, W + 900, E.inOutCubic(prog(t, 0.0 + k * 0.08, 0.75 + k * 0.08)));
+    ctx.save(); ctx.fillStyle = col; ctx.beginPath();
+    ctx.moveTo(x - 200, 0); ctx.lineTo(x + 200, 0); ctx.lineTo(x - 100, H); ctx.lineTo(x - 500, H); ctx.fill(); ctx.restore();
+  });
+  pop('SUMMER', W / 2, 400, t, 1.0, { size: 280, color: '#fff', shadow: C.a, st: 0.125 });
+  pop(T.title, W / 2, 620, t, 2.0, { size: 112, color: C.y, st: 0.04 });
+  pill(T.place, W / 2, 770, t, 2.75, { size: 50, align: 'center', bg: C.c, fg: '#fff', rot: 0 });
+}
+
+/* =========================================================
+   TRANSITIONS + GLOBAL LOOK
+   ========================================================= */
+const TRD = { zoom: 0.22, whipL: 0.2, whipR: 0.2, up: 0.2, circle: 0.4, flash: 0 };
+const FLASH = [[1.0, 0.25], [4, 0.45], [8, 0.8], [11.05, 0.35], [13.0, 0.7], [18, 0.6], [22, 1], [24.0, 0.5], [29.1, 0.4], [32, 0.7], [38, 0.5]];
+const BUF = {};
+function drawShot(i, t, target) {
+  const sh = SHOTS[i];
+  const keep = ctx; ctx = target;
+  ctx.save(); sh.draw(t, t - sh.s, clamp((t - sh.s) / (sh.e - sh.s)), sh); ctx.restore();
+  ctx = keep;
+}
+function buf(n) { if (!BUF[n]) BUF[n] = mk(W, H); const x = BUF[n].getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.globalAlpha = 1; x.globalCompositeOperation = 'source-over'; x.fillStyle = '#000'; x.fillRect(0, 0, W, H); return x; }
+function smear(img, ox, oy, dx, dy, amt) {
+  const N = 7; ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 1 / N;
+  for (let j = 0; j < N; j++) { const f = (j / (N - 1) - 0.5) * amt; ctx.drawImage(img, ox + dx * f, oy + dy * f); }
+  ctx.restore();
+}
+function pulse(t) {
+  if (!((t >= 4 && t < 20) || (t >= 22 && t < 38))) return 1;
+  const b = t % BEAT, down = Math.floor(t / BEAT) % 4 === 0;
+  return 1 + (down ? 0.022 : 0.012) * Math.exp(-b / 0.07);
+}
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const i = Math.max(0, SHOTS.findIndex(s => t >= s.s && t < s.e));
+  // which cut (if any) are we straddling?
+  let a = -1, b = -1, k = 0, type = null;
+  const nx = SHOTS[i + 1], d1 = nx ? TRD[nx.tr] : 0, d0 = TRD[SHOTS[i].tr] || 0;
+  if (nx && d1 && t > nx.s - d1) { a = i; b = i + 1; type = nx.tr; k = (t - (nx.s - d1)) / (2 * d1); }
+  else if (i > 0 && d0 && t < SHOTS[i].s + d0) { a = i - 1; b = i; type = SHOTS[i].tr; k = (t - (SHOTS[i].s - d0)) / (2 * d0); }
+  const s = pulse(t), ji = Math.sin(t * 1.3) * 2;
+  ctx.save(); ctx.translate(W / 2 + ji, H / 2); ctx.scale(s, s); ctx.translate(-W / 2, -H / 2);
+  if (type) {
+    const A = buf('a'), B = buf('b'); drawShot(a, t, A); drawShot(b, t, B);
+    const e = E.inOutCubic(clamp(k)), m = Math.sin(Math.PI * clamp(k));
+    if (type === 'whipL' || type === 'whipR') {
+      const dir = type === 'whipL' ? -1 : 1;
+      smear(BUF.a, dir * e * W, 0, 1, 0, m * 260); smear(BUF.b, -dir * (1 - e) * W, 0, 1, 0, m * 260);
+    } else if (type === 'up') {
+      smear(BUF.a, 0, -e * H, 0, 1, m * 200); smear(BUF.b, 0, (1 - e) * H, 0, 1, m * 200);
+    } else if (type === 'zoom') {
+      const sb = lerp(1.35, 1, e);
+      ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(sb, sb); ctx.drawImage(BUF.b, -W / 2, -H / 2); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 1 - e; ctx.translate(W / 2, H / 2); ctx.scale(1 + e * 0.9, 1 + e * 0.9); ctx.drawImage(BUF.a, -W / 2, -H / 2); ctx.restore();
+      ctx.fillStyle = `rgba(255,255,255,${m * 0.35})`; ctx.fillRect(0, 0, W, H);
+    } else if (type === 'circle') {
+      ctx.drawImage(BUF.a, 0, 0);
+      const r = E.inOutCubic(clamp(k)) * 1150;
+      ctx.save(); ctx.beginPath(); ctx.arc(W / 2, H / 2, r, 0, TAU); ctx.clip(); ctx.drawImage(BUF.b, 0, 0); ctx.restore();
+      ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 18 * m; ctx.beginPath(); ctx.arc(W / 2, H / 2, r, 0, TAU); ctx.stroke(); ctx.restore();
+    }
+  } else drawShot(i, t, ctx);
+  ctx.restore();
+  // summer grade: vivid, a touch of contrast and lift
+  const G = buf('g'); G.filter = 'saturate(1.16) contrast(1.06) brightness(1.03)'; G.drawImage(cv, 0, 0); G.filter = 'none';
+  ctx.drawImage(BUF.g, 0, 0);
+  ctx.save(); ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,200,120,0.12)'; ctx.fillRect(0, 0, W, H); ctx.restore();
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.45, W / 2, H / 2, H * 1.05);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,10,30,0.3)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.035; ctx.drawImage(PRE.grain[Math.floor(t * FPS) % 6], 0, 0, W, H); ctx.restore();
+  for (const [ft, fa] of FLASH) if (t >= ft && t < ft + 0.5) { ctx.fillStyle = `rgba(255,255,255,${fa * Math.exp(-(t - ft) / 0.09)})`; ctx.fillRect(0, 0, W, H); }
+  if (t > DUR - 1.2) { ctx.fillStyle = `rgba(0,0,0,${E.inOutSine(prog(t, DUR - 1.2, DUR - 0.05))})`; ctx.fillRect(0, 0, W, H); }
+}
+
+window.READY = init().then(async () => { await prep(0); render(0); return true; });
+if (location.search.includes('play')) window.READY.then(() => {
+  const t0 = performance.now();
+  const loop = async () => { const t = ((performance.now() - t0) / 1000) % DUR; await prep(t); render(t); requestAnimationFrame(loop); };
+  loop();
+});
+</script>
+</body>
+</html>
