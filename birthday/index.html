@@ -1,0 +1,491 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Birthday Film</title>
+<style>
+  @font-face { font-family: 'BHS'; src: url('fonts/BlackHanSans-Regular.ttf'); }
+  @font-face { font-family: 'Pen'; src: url('fonts/NanumPenScript-Regular.ttf'); }
+  @font-face { font-family: 'Gowun'; src: url('fonts/GowunBatang-Bold.ttf'); font-weight: 700; }
+  html,body{margin:0;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+/* =========================================================
+   생일 축하 영상 — vertical 9:16 party film (60s)
+   120 BPM → beat 0.5s, bar 2s; every cut lands on a beat.
+   Ch.1 flowers · Ch.2 birthday dinner · Ch.3 family ·
+   live clip (family sings) · confetti finale.
+   Photos: assets/p01–p14.jpg · clip frames: assets/v/{a,b}_####.jpg
+   ========================================================= */
+const W = 1080, H = 1920, FPS = 30, DUR = 60;
+const BEAT = 0.5, BAR = 2;
+const CLIP0 = 27, CLIPA = 21.6, CLIPB = 3.4, FIN = CLIP0 + CLIPA + CLIPB; // 52
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');
+const C = { cream: '#FFF6EE', pink: '#FF7E9D', rose: '#FF4F7B', peach: '#FFB38A', gold: '#FFD36B', ink: '#2A1420', blush: '#FFD9E2' };
+const CONF = ['#FF4F7B', '#FFD36B', '#7FD6C2', '#8EC5FF', '#FFFFFF', '#FF9F6B', '#C9A7FF'];
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const TAU = Math.PI * 2;
+const E = {
+  inOutSine: x => -(Math.cos(Math.PI * x) - 1) / 2,
+  outCubic: x => 1 - Math.pow(1 - x, 3),
+  inOutCubic: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  outBack: (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2),
+  outExpo: x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x),
+  inOutExpo: x => x <= 0 ? 0 : x >= 1 ? 1 : x < .5 ? Math.pow(2, 20 * x - 10) / 2 : (2 - Math.pow(2, -20 * x + 10)) / 2,
+};
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+const load = src => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+
+/* ---------- assets ---------- */
+const IMG = [], PRE = { blur: [] };
+// face/subject focus per photo (fraction of width, height)
+const FOCUS = { 1: [.5, .5], 2: [.5, .5], 3: [.5, .5], 4: [.55, .4], 5: [.55, .45], 6: [.55, .45], 7: [.55, .4],
+  8: [.5, .45], 9: [.5, .5], 10: [.45, .45], 11: [.5, .5], 12: [.5, .5], 13: [.5, .5], 14: [.5, .5] };
+async function init() {
+  await Promise.all(Array.from({ length: 14 }, (_, i) =>
+    load(`assets/p${String(i + 1).padStart(2, '0')}.jpg`).then(im => { IMG[i + 1] = im; })));
+  await Promise.all([document.fonts.load('100px BHS'), document.fonts.load('80px Pen'), document.fonts.load('700 60px Gowun')]);
+  for (let i = 1; i <= 14; i++) {
+    const b = mk(W / 2, H / 2), x = b.getContext('2d');
+    x.filter = 'blur(30px) saturate(1.2) brightness(0.85)';
+    cover(x, IMG[i], -60, -60, W / 2 + 120, H / 2 + 120, FOCUS[i][0], FOCUS[i][1], 1);
+    PRE.blur[i] = b;
+  }
+  PRE.grain = [];
+  for (let g = 0; g < 6; g++) {
+    const c = mk(360, 640), x = c.getContext('2d'), d = x.createImageData(360, 640);
+    for (let i = 0; i < d.data.length; i += 4) { const v = hash(g * 1e5 + i) * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+    x.putImageData(d, 0, 0); PRE.grain.push(c);
+  }
+  PRE.buf = [mk(W, H), mk(W, H)];
+}
+// clip frame for time t (null outside the clip)
+function clipKey(t) {
+  const tau = t - CLIP0;
+  if (tau < -0.5 || tau >= CLIPA + CLIPB) return null;
+  if (tau < CLIPA) return `a_${String(clamp(Math.floor(tau * FPS), 0, 647) + 1).padStart(4, '0')}`;
+  return `b_${String(clamp(Math.floor((tau - CLIPA) * FPS), 0, 101) + 1).padStart(4, '0')}`;
+}
+const VF = { key: null, img: null };
+async function prep(t) {
+  const k = clipKey(t);
+  if (k && k !== VF.key) { VF.img = await load(`assets/v/${k}.jpg`); VF.key = k; }
+}
+
+/* ---------- drawing helpers ---------- */
+function cover(x, img, dx, dy, dw, dh, fx = .5, fy = .5, zoom = 1) {
+  const iw = img.width, ih = img.height, s = Math.max(dw / iw, dh / ih) * zoom;
+  const sw = dw / s, sh = dh / s;
+  const sx = clamp(fx * iw - sw / 2, 0, iw - sw), sy = clamp(fy * ih - sh / 2, 0, ih - sh);
+  x.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+function rrect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+// full-bleed Ken Burns
+function kb(i, p, z0, z1, f0 = FOCUS[i], f1 = f0) {
+  const e = E.inOutSine(p);
+  cover(ctx, IMG[i], 0, 0, W, H, lerp(f0[0], f1[0], e), lerp(f0[1], f1[1], e), lerp(z0, z1, e));
+}
+// rounded photo card with white border + shadow
+function card(i, cx, cy, w, h, rot, p, o = {}) {
+  const b = o.border ?? 18, r = o.r ?? 26;
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(rot); ctx.scale(o.s ?? 1, o.s ?? 1);
+  ctx.save(); ctx.shadowColor = 'rgba(60,10,30,0.45)'; ctx.shadowBlur = 50; ctx.shadowOffsetY = 18;
+  ctx.fillStyle = '#fff'; rrect(-w / 2 - b, -h / 2 - b, w + 2 * b, h + 2 * b + (o.foot || 0), r + b / 2); ctx.fill(); ctx.restore();
+  ctx.save(); rrect(-w / 2, -h / 2, w, h, r); ctx.clip();
+  const f = FOCUS[i]; cover(ctx, IMG[i], -w / 2, -h / 2, w, h, f[0], f[1], lerp(o.z0 ?? 1.0, o.z1 ?? 1.12, E.inOutSine(p)));
+  ctx.restore(); ctx.restore();
+}
+function blurBed(i, tint = 'rgba(255,170,190,0.28)') {
+  ctx.drawImage(PRE.blur[i], 0, 0, W, H);
+  ctx.fillStyle = tint; ctx.fillRect(0, 0, W, H);
+}
+function shade(y0, y1, a = 0.6, col = '60,10,30') {
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, `rgba(${col},0)`); g.addColorStop(1, `rgba(${col},${a})`);
+  ctx.fillStyle = g; ctx.fillRect(0, Math.min(y0, y1), W, Math.abs(y1 - y0));
+}
+/* kinetic letters: each glyph pops with overshoot, staggered */
+function pop(str, x, y, size, t, t0, t1 = 999, o = {}) {
+  const out = 1 - prog(t, t1 - 0.3, t1);
+  if (t < t0 || out <= 0) return;
+  ctx.save();
+  ctx.font = `${size}px ${o.font || 'BHS'}`; ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+  if (o.ls) ctx.letterSpacing = `${o.ls}px`;
+  const chars = [...str], ws = chars.map(c => ctx.measureText(c).width), tw = ws.reduce((a, b) => a + b, 0);
+  let cx = o.align === 'left' ? x : x - tw / 2;
+  const st = o.stag ?? 0.06;
+  chars.forEach((c, k) => {
+    const e = prog(t, t0 + k * st, t0 + k * st + 0.42);
+    if (e > 0) {
+      const s = E.outBack(e, 2.4), a = clamp(e * 3) * out;
+      ctx.save(); ctx.globalAlpha = a; ctx.translate(cx + ws[k] / 2, y - size * 0.35);
+      ctx.rotate((1 - E.outCubic(e)) * (k % 2 ? 0.5 : -0.5)); ctx.scale(s, s);
+      if (o.stroke) { ctx.lineWidth = o.stroke[1]; ctx.strokeStyle = o.stroke[0]; ctx.lineJoin = 'round'; ctx.strokeText(c, -ws[k] / 2, size * 0.35); }
+      ctx.shadowColor = o.glow || 'rgba(120,20,60,0.5)'; ctx.shadowBlur = 24; ctx.shadowOffsetY = 6;
+      ctx.fillStyle = Array.isArray(o.color) ? o.color[k % o.color.length] : (o.color || '#fff');
+      ctx.fillText(c, -ws[k] / 2, size * 0.35);
+      ctx.restore();
+    }
+    cx += ws[k];
+  });
+  ctx.restore();
+}
+/* handwritten note revealed left→right like a pen stroke */
+function pen(str, x, y, t, t0, t1, o = {}) {
+  const out = 1 - prog(t, t1 - 0.3, t1);
+  if (t < t0 || out <= 0) return;
+  const size = o.size || 96;
+  ctx.save(); ctx.font = `${size}px Pen`; ctx.textAlign = 'left';
+  const w = ctx.measureText(str).width, ax = o.align === 'left' ? x : x - w / 2;
+  const p = E.inOutSine(prog(t, t0, t0 + (o.dur || 0.6)));
+  ctx.translate(ax, y); ctx.rotate(o.rot ?? -0.04);
+  ctx.beginPath(); ctx.rect(-10, -size, (w + 20) * p, size * 1.6); ctx.clip();
+  ctx.globalAlpha = out;
+  ctx.shadowColor = o.glow || 'rgba(80,10,40,0.55)'; ctx.shadowBlur = 16;
+  ctx.fillStyle = o.color || '#fff'; ctx.fillText(str, 0, 0);
+  ctx.restore();
+}
+/* chapter pill: slides in from the left */
+function pill(num, label, y, t, t0, t1) {
+  const e = E.outExpo(prog(t, t0, t0 + 0.5)), out = 1 - prog(t, t1 - 0.3, t1);
+  if (e <= 0 || out <= 0) return;
+  ctx.save(); ctx.globalAlpha = out; ctx.translate(lerp(-520, 0, e), 0);
+  ctx.font = '46px BHS'; const w = ctx.measureText(label).width + 190;
+  ctx.fillStyle = C.rose; rrect(70, y - 56, w, 84, 42); ctx.fill();
+  ctx.fillStyle = '#fff'; rrect(82, y - 46, 104, 64, 32); ctx.fill();
+  ctx.fillStyle = C.rose; ctx.textAlign = 'center'; ctx.fillText(num, 134, y + 2);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.fillText(label, 210, y + 2);
+  ctx.restore();
+}
+function heart(x, y, s, col, a = 1) {
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.scale(s, s); ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(0, 6); ctx.bezierCurveTo(-14, -6, -8, -18, 0, -10); ctx.bezierCurveTo(8, -18, 14, -6, 0, 6); ctx.fill();
+  ctx.restore();
+}
+function note(x, y, s, col, a = 1) {
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.scale(s, s); ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.ellipse(0, 0, 9, 7, -0.4, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(8, -2); ctx.lineTo(8, -34); ctx.quadraticCurveTo(14, -26, 22, -22); ctx.stroke();
+  ctx.restore();
+}
+function sparkle(x, y, r, a, col = '#fff') {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.fillStyle = col;
+  ctx.shadowColor = col; ctx.shadowBlur = 14;
+  ctx.beginPath();
+  for (let k = 0; k < 8; k++) { const ang = k * Math.PI / 4, rr = k % 2 ? r * 0.22 : r; ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr); }
+  ctx.fill(); ctx.restore();
+}
+
+/* ---------- particles ---------- */
+function petals(t, n, a = 1) {
+  for (let i = 0; i < n; i++) {
+    const sp = 90 + hash(i + 3) * 120, sz = 14 + hash(i + 9) * 18;
+    const y = ((hash(i + 1) * (H + 300) + t * sp) % (H + 300)) - 150;
+    const x = hash(i + 5) * W + Math.sin(t * (0.8 + hash(i) * 0.8) + i) * 60;
+    const rot = t * (1 + hash(i + 2) * 2) + i, flip = Math.cos(t * 2.2 + i * 1.7);
+    ctx.save(); ctx.globalAlpha = a * (0.55 + hash(i + 4) * 0.4); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(1, 0.35 + 0.65 * Math.abs(flip));
+    ctx.fillStyle = ['#FFC3D0', '#FFD9C2', '#FFFFFF', '#FFB0C4'][i % 4];
+    ctx.beginPath(); ctx.moveTo(0, -sz); ctx.bezierCurveTo(sz * 0.9, -sz * 0.6, sz * 0.7, sz * 0.7, 0, sz);
+    ctx.bezierCurveTo(-sz * 0.7, sz * 0.7, -sz * 0.9, -sz * 0.6, 0, -sz); ctx.fill();
+    ctx.restore();
+  }
+}
+// confetti burst from (x0,y0) launched at t0, aimed by angle range
+function confetti(t, t0, x0, y0, n, ang0, ang1, seed = 0, pw = 1) {
+  const tau = t - t0; if (tau < 0 || tau > 6) return;
+  for (let i = 0; i < n; i++) {
+    const h = k => hash(seed * 1000 + i * 7 + k);
+    const ang = lerp(ang0, ang1, h(1)), v = (900 + h(2) * 1500) * pw;
+    const drag = 1.6, vx = Math.cos(ang) * v, vy = Math.sin(ang) * v;
+    const f = (1 - Math.exp(-drag * tau)) / drag;
+    const x = x0 + vx * f + Math.sin(tau * 3 + i) * 30 * tau, y = y0 + vy * f + 380 * tau * tau * 0.5 + 160 * tau;
+    if (y > H + 40) continue;
+    const a = 1 - prog(tau, 4.5, 6);
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(x, y); ctx.rotate(tau * (4 + h(3) * 8) + i);
+    ctx.scale(1, Math.cos(tau * (6 + h(4) * 8) + i));
+    ctx.fillStyle = CONF[i % CONF.length];
+    if (i % 3 === 0) { ctx.beginPath(); ctx.arc(0, 0, 8 + h(5) * 6, 0, TAU); ctx.fill(); }
+    else ctx.fillRect(-12, -6, 24 + h(6) * 12, 12);
+    ctx.restore();
+  }
+}
+function confettiRain(t, t0, n) {
+  if (t < t0) return;
+  for (let i = 0; i < n; i++) {
+    const sp = 260 + hash(i + 21) * 260, y = ((hash(i + 11) * (H + 200) + (t - t0) * sp) % (H + 200)) - 100;
+    const x = hash(i + 31) * W + Math.sin(t * 2 + i) * 40;
+    ctx.save(); ctx.globalAlpha = clamp((t - t0) * 2) * 0.9; ctx.translate(x, y); ctx.rotate(t * 3 + i); ctx.scale(1, Math.cos(t * 5 + i));
+    ctx.fillStyle = CONF[i % CONF.length]; ctx.fillRect(-10, -5, 20, 10); ctx.restore();
+  }
+}
+function risers(t, t0, t1, kind) { // notes / hearts floating up from the edges
+  for (let i = 0; i < 16; i++) {
+    const per = 3.2 + hash(i + 40) * 2, ph = hash(i + 41) * per;
+    const k = ((t - t0 + ph) % per) / per;
+    const tt = t - (k * per); if (tt < t0 || t > t1) continue;
+    const side = i % 2 ? 1 : -1, x = (side > 0 ? W - 90 : 90) - side * hash(i + 42) * 160 + Math.sin(k * 6 + i) * 30;
+    const y = H - 200 - k * 900, a = Math.sin(Math.PI * k) * 0.95;
+    const col = [C.gold, '#fff', C.pink][i % 3];
+    if (kind === 'note' && i % 3) note(x, y, 1.4 + hash(i + 43), col, a); else heart(x, y, 2.6 + hash(i + 44) * 1.4, i % 2 ? C.pink : '#fff', a);
+  }
+}
+
+/* =========================================================
+   SHOTS — enter: 'zoom' | 'whip' | 'up' | 'cut' (flash).
+   Outgoing shot keeps drawing for TR while the next enters.
+   ========================================================= */
+const TR = 0.32;
+const SHOTS = [
+  { s: 0, draw: titleShot },
+  // ── Ch.1 flowers ──
+  { s: 4, in: 'zoom', draw: (t, p) => { kb(8, p, 1.12, 1.0, [.5, .42], [.5, .46]); petals(t, 10, 0.8); shade(1250, 1920, 0.75);
+      pill('01', '꽃향기 가득한 날', 1430, t, 4.15, 6.3);
+      pop('꽃보다 예쁜', W / 2, 1610, 120, t, 4.5, 6.3, { stag: 0.05 });
+      pop('오늘의 주인공', W / 2, 1760, 120, t, 4.9, 6.3, { stag: 0.05, color: C.blush }); } },
+  { s: 6, in: 'whip', draw: (t, p) => { kb(7, p, 1.0, 1.1, [.55, .38], [.55, .36]); petals(t, 10, 0.8); shade(1350, 1920, 0.7);
+      pen('수줍은 미소까지', W / 2, 1620, t, 6.3, 8.3, { size: 120 });
+      pen('완벽해요 ♥', W / 2, 1770, t, 6.9, 8.3, { size: 110, color: C.blush }); } },
+  { s: 8, in: 'whip', draw: (t, p) => { kb(6, p, 1.14, 1.02, [.5, .45], [.56, .42]); petals(t, 12, 0.8); shade(1350, 1920, 0.7);
+      pop('향기마저', 120, 1640, 130, t, 8.3, 10.3, { align: 'left', stag: 0.07 });
+      pop('사랑스러워', 120, 1790, 130, t, 8.6, 10.3, { align: 'left', stag: 0.07, color: C.blush }); } },
+  { s: 10, in: 'zoom', draw: (t, p) => { kb(4, p, 1.0, 1.08, [.5, .45], [.5, .4]); petals(t, 12, 0.8); shade(1400, 1920, 0.7);
+      pen('셋이서 꽃다발 들고,', W / 2, 1650, t, 10.3, 12.3, { size: 104 });
+      pen('찰칵!', W / 2, 1790, t, 10.9, 12.3, { size: 130, color: C.gold, rot: -0.08 });
+      flashSpark(t, 11.0, 820, 1760); } },
+  // ── Ch.2 dinner ──
+  { s: 12, in: 'up', draw: (t, p) => { foodCard(14, t, p, -0.03);
+      pill('02', '생일 만찬', 300, t, 12.15, 14.3);
+      pop('오늘은 당신을 위한', W / 2, 1520, 96, t, 12.5, 14.3, { stag: 0.04 });
+      pop('특별한 만찬', W / 2, 1670, 140, t, 12.9, 14.3, { stag: 0.07, color: C.gold }); } },
+  { s: 14, in: 'whip', draw: (t, p) => { foodCard(13, t, p, 0.03);
+      pen('크림 듬뿍 새우 파스타', W / 2, 1560, t, 14.3, 16.3, { size: 104 });
+      pen('냠냠 ♥', W / 2, 1700, t, 14.9, 16.3, { size: 120, color: C.blush }); } },
+  { s: 16, in: 'whip', draw: splitFood },
+  { s: 18, in: 'zoom', draw: collageFood },
+  // ── Ch.3 family ──
+  { s: 20, in: 'up', draw: (t, p) => { kb(5, p, 1.12, 1.0, [.55, .42], [.52, .45]); shade(1350, 1920, 0.72);
+      pill('03', '우리 가족', 1430, t, 20.15, 22.3);
+      pop('엄마 꼬옥~', W / 2, 1650, 150, t, 20.5, 22.3, { stag: 0.08 });
+      pen('사랑을 가득 담아서', W / 2, 1790, t, 21.0, 22.3, { size: 92, color: C.blush }); } },
+  { s: 22, in: 'whip', draw: (t, p) => { kb(9, p, 1.0, 1.1, [.55, .45], [.6, .42]); shade(1400, 1920, 0.7);
+      pop('세상에서 제일', W / 2, 1620, 110, t, 22.3, 24.3, { stag: 0.05 });
+      pop('행복한 품', W / 2, 1770, 140, t, 22.7, 24.3, { stag: 0.08, color: C.gold }); } },
+  { s: 24, in: 'cut', draw: (t, p) => boothShot(t, p, 1, '하나', 24) },
+  { s: 25, in: 'cut', draw: (t, p) => boothShot(t, p, 2, '둘', 25) },
+  { s: 26, in: 'cut', draw: (t, p) => boothShot(t, p, 3, '셋!', 26) },
+  // ── live clip ──
+  { s: CLIP0, in: 'zoom', draw: clipShot },
+  // ── finale ──
+  { s: FIN, in: 'cut', draw: finaleShot },
+];
+SHOTS.forEach((s, i) => { s.e = i + 1 < SHOTS.length ? SHOTS[i + 1].s : DUR + 1; });
+const CUTS = SHOTS.slice(1).map(s => [s.s, s.in]);
+
+function titleShot(t, p) {
+  kb(10, p, 1.2, 1.05, [.45, .5], [.5, .42]);
+  ctx.fillStyle = 'rgba(255,150,180,0.22)'; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(W / 2, 900, 100, W / 2, 900, 900);
+  g.addColorStop(0, 'rgba(70,10,35,0.55)'); g.addColorStop(1, 'rgba(70,10,35,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  petals(t, 18);
+  pen('사랑하는 당신에게', W / 2, 640, t, 0.3, 99, { size: 96, color: C.blush, rot: -0.03 });
+  pop('HAPPY', W / 2, 880, 250, t, 0.9, 99, { stag: 0.09, color: ['#fff', C.blush], ls: 6 });
+  pop('BIRTHDAY', W / 2, 1100, 196, t, 1.5, 99, { stag: 0.07, color: [C.gold, '#fff'], ls: 4 });
+  const lp = E.outExpo(prog(t, 2.3, 2.9));
+  ctx.fillStyle = C.gold; ctx.fillRect(W / 2 - 300 * lp, 1160, 600 * lp, 8);
+  pop('오늘은 당신의 날', W / 2, 1290, 84, t, 2.6, 99, { stag: 0.04 });
+  for (let k = 0; k < 9; k++) {
+    const tk = 1.0 + k * 0.32, a = Math.sin(Math.PI * prog(t, tk, tk + 0.9));
+    sparkle(160 + hash(k + 70) * 760, 650 + hash(k + 71) * 700, 22 + hash(k + 72) * 26, a, k % 2 ? C.gold : '#fff');
+  }
+}
+function flashSpark(t, t0, x, y) {
+  for (let k = 0; k < 6; k++) {
+    const e = prog(t, t0, t0 + 0.5), ang = k * TAU / 6;
+    sparkle(x + Math.cos(ang) * 120 * E.outCubic(e), y - 60 + Math.sin(ang) * 120 * E.outCubic(e), 26, Math.sin(Math.PI * e), C.gold);
+  }
+}
+function foodCard(i, t, p, rot) {
+  blurBed(i, 'rgba(255,190,170,0.3)');
+  card(i, W / 2, 860, 940, 705, rot * (1 - E.outCubic(p) * 0.6), p, { z0: 1.0, z1: 1.14 });
+}
+function splitFood(t, p) {
+  const t0 = 16;
+  blurBed(11, 'rgba(255,190,170,0.35)');
+  const e1 = E.outBack(prog(t, t0 + 0.05, t0 + 0.5), 1.3), e2 = E.outBack(prog(t, t0 + 0.5, t0 + 0.95), 1.3);
+  card(11, lerp(-600, W / 2 - 40, e1), 560, 820, 615, -0.04, p);
+  if (e2 > 0) card(12, lerp(W + 600, W / 2 + 40, e2), 1250, 820, 615, 0.04, p);
+  pen('냠냠, 하나도', 90, 1700, t, t0 + 0.9, t0 + 2.3, { size: 104, align: 'left' });
+  pen('안 남기기!', 330, 1820, t, t0 + 1.3, t0 + 2.3, { size: 120, align: 'left', color: C.gold });
+}
+function collageFood(t, p) {
+  const t0 = 18;
+  ctx.fillStyle = '#FFE6E0'; ctx.fillRect(0, 0, W, H);
+  rays(t, 'rgba(255,255,255,0.45)', W / 2, 900);
+  const cs = [[14, 300, 470, -0.08], [13, 790, 560, 0.07], [11, 290, 1100, 0.06], [12, 780, 1190, -0.05]];
+  cs.forEach(([i, x, y, r], k) => {
+    const e = prog(t, t0 + k * BEAT * 0.5, t0 + k * BEAT * 0.5 + 0.4);
+    if (e <= 0) return;
+    card(i, x, y, 460, 345, r, p, { s: E.outBack(e, 2), border: 14, r: 18 });
+  });
+  pop('함께라서', W / 2, 1610, 130, t, t0 + 0.9, t0 + 2.3, { stag: 0.07, color: C.rose, glow: 'rgba(255,255,255,0.9)' });
+  pop('더 맛있는 저녁', W / 2, 1770, 130, t, t0 + 1.2, t0 + 2.3, { stag: 0.06, color: C.ink, glow: 'rgba(255,255,255,0.9)' });
+}
+function rays(t, col, cx, cy) {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.25); ctx.fillStyle = col;
+  for (let k = 0; k < 14; k++) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, 2400, k * TAU / 14, k * TAU / 14 + TAU / 28); ctx.fill(); }
+  ctx.restore();
+}
+function boothShot(t, p, i, label, t0) {
+  ctx.fillStyle = C.rose; ctx.fillRect(0, 0, W, H);
+  rays(t, 'rgba(255,255,255,0.12)', W / 2, 760);
+  const e = E.outBack(prog(t, t0, t0 + 0.35), 1.6);
+  card(i, W / 2, 800, 860, 1050, (i - 2) * 0.04, p, { s: lerp(1.25, 1, e), z0: 1.06, z1: 1.0, foot: 0 });
+  pop(label, W / 2, 1640, 230, t, t0 + 0.05, 99, { stag: 0.08, color: '#fff', glow: 'rgba(120,0,40,0.6)' });
+  if (i === 3) pen('그리고, 우리의 노래 ♪', W / 2, 1820, t, t0 + 0.3, 99, { size: 92, color: C.gold });
+}
+function clipShot(t, p) {
+  const tau = t - CLIP0;
+  if (VF.img) ctx.drawImage(VF.img, 0, 0, W, H);
+  // live badge
+  const be = E.outExpo(prog(tau, 0.4, 0.9)) * (1 - prog(tau, CLIPA - 0.4, CLIPA));
+  if (be > 0) {
+    ctx.save(); ctx.globalAlpha = be; ctx.translate(0, lerp(-140, 0, be));
+    ctx.font = '44px BHS'; const label = '우리 가족 생일 축하 노래', w = ctx.measureText(label).width + 130;
+    ctx.fillStyle = 'rgba(255,255,255,0.92)'; rrect(W / 2 - w / 2, 70, w, 84, 42); ctx.fill();
+    ctx.fillStyle = C.rose; ctx.beginPath(); ctx.arc(W / 2 - w / 2 + 52, 112, 13 + 3 * Math.sin(t * 8), 0, TAU); ctx.fill();
+    ctx.fillStyle = C.ink; ctx.textAlign = 'left'; ctx.fillText(label, W / 2 - w / 2 + 86, 128);
+    ctx.restore();
+  }
+  shade(1500, 1920, 0.35);
+  pen('다 같이, 생일 축하합니다 ♪', W / 2, 1780, t, CLIP0 + 0.6, CLIP0 + 5, { size: 96 });
+  risers(t, CLIP0 + 0.8, FIN, tau < CLIPA ? 'note' : 'heart');
+  if (tau >= CLIPA) {
+    const t1 = CLIP0 + CLIPA;
+    confetti(t, t1 + 0.05, 0, H * 0.75, 50, -1.4, -0.7, 3, 0.9);
+    confetti(t, t1 + 0.05, W, H * 0.75, 50, -2.4, -1.75, 4, 0.9);
+    pop('축하해요!!', W / 2, 1560, 170, t, t1 + 0.2, 99, { stag: 0.07, color: [C.gold, '#fff', C.pink], stroke: ['rgba(120,0,40,0.55)', 10] });
+    pen('짝짝짝~', W / 2, 1760, t, t1 + 0.9, 99, { size: 120, color: '#fff' });
+  }
+}
+function finaleShot(t, p) {
+  const t0 = FIN, tau = t - t0;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#FFC2D1'); g.addColorStop(0.55, '#FFE1E6'); g.addColorStop(1, '#FFD9C4');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  rays(t, 'rgba(255,255,255,0.35)', W / 2, 760);
+  petals(t, 14, 0.9);
+  const e = E.outBack(prog(t, t0 + 0.05, t0 + 0.6), 1.5);
+  const rot = -0.035 + 0.14 * Math.exp(-tau * 2.5) * Math.cos(tau * 9);
+  card(3, W / 2, 760, 820, 1000, rot, prog(t, t0, DUR), { s: lerp(1.7, 1, e), border: 26, foot: 0, z0: 1.12, z1: 1.0 });
+  pen('From. 우리 가족', W / 2, 150, t, t0 + 1.2, 99, { size: 80, color: C.rose, glow: 'rgba(255,255,255,0.8)', rot: -0.02 });
+  pop('HAPPY', W / 2, 1480, 190, t, t0 + 0.5, 99, { stag: 0.07, color: [C.rose, '#FF9F6B'], glow: 'rgba(255,255,255,0.9)', ls: 4 });
+  pop('BIRTHDAY', W / 2, 1650, 160, t, t0 + 0.9, 99, { stag: 0.06, color: [C.ink, C.rose], glow: 'rgba(255,255,255,0.9)', ls: 3 });
+  pen('언제나 고맙고, 사랑해요', W / 2, 1800, t, t0 + 1.8, 99, { size: 96, color: C.rose, glow: 'rgba(255,255,255,0.9)' });
+  const hb = 1 + 0.12 * Math.max(0, Math.sin(tau * Math.PI * 2 * 2)) ** 8;
+  const ha = E.outBack(prog(t, t0 + 2.4, t0 + 2.8), 2.5);
+  if (ha > 0) { heart(95, 1420, 5 * ha * hb, C.rose); heart(W - 95, 1400, 4.4 * ha * hb, '#FF9F6B'); }
+  confetti(t, t0, 0, H, 90, -1.35, -0.75, 1, 1.1);
+  confetti(t, t0, W, H, 90, -2.4, -1.8, 2, 1.1);
+  confetti(t, t0 + 2.0, W / 2, H, 70, -2.0, -1.15, 5, 1.2);
+  confettiRain(t, t0 + 1.0, 40);
+}
+
+/* =========================================================
+   GLOBAL — transitions, beat punch, grade, grain, flashes
+   ========================================================= */
+function enterXf(kind, e) { // transform for the incoming shot at transition progress e
+  const k = E.inOutExpo(e);
+  if (kind === 'whip') return { x: W * (1 - k), blur: Math.sin(Math.PI * e) * 26 };
+  if (kind === 'up') return { y: H * (1 - E.outExpo(e)) };
+  if (kind === 'zoom') return { s: lerp(1.5, 1, E.outExpo(e)), a: clamp(e * 2.5), blur: (1 - e) * 18 };
+  return {};
+}
+function exitXf(kind, e) {
+  const k = E.inOutExpo(e);
+  if (kind === 'whip') return { x: -W * k, blur: Math.sin(Math.PI * e) * 26 };
+  if (kind === 'up') return { y: -H * 0.3 * E.outExpo(e), dark: 0.5 * e };
+  if (kind === 'zoom') return { s: 1 + 0.35 * E.outCubic(e) };
+  if (kind === 'cut') return { hide: true };
+  return {};
+}
+function composite(buf, xf) {
+  ctx.save();
+  ctx.globalAlpha = xf.a ?? 1;
+  if (xf.blur > 0.5) ctx.filter = `blur(${xf.blur.toFixed(1)}px)`;
+  ctx.translate(W / 2 + (xf.x || 0), H / 2 + (xf.y || 0)); const s = xf.s || 1; ctx.scale(s, s);
+  ctx.drawImage(buf, -W / 2, -H / 2);
+  ctx.filter = 'none';
+  if (xf.dark) { ctx.fillStyle = `rgba(0,0,0,${xf.dark})`; ctx.fillRect(-W / 2, -H / 2, W, H); }
+  ctx.restore();
+}
+function grade(t) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,160,170,0.20)'; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = 'rgb(16,8,10)'; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over';
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(40,0,15,0.3)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.07;
+  ctx.drawImage(PRE.grain[Math.floor(t * FPS) % 6], 0, 0, W, H);
+  ctx.restore();
+}
+function flashes(t) {
+  let a = 0;
+  for (const [c, kind] of CUTS) {
+    const d = t - c; if (d < -0.05 || d > 0.4) continue;
+    const peak = kind === 'cut' ? 0.85 : kind === 'zoom' ? 0.45 : 0.15;
+    a = Math.max(a, peak * (d < 0 ? 1 + d / 0.05 : Math.exp(-d * 12)));
+  }
+  if (a > 0) { ctx.fillStyle = `rgba(255,248,250,${a})`; ctx.fillRect(0, 0, W, H); }
+}
+
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.filter = 'none';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  // beat punch: a small zoom kick every 2 beats (not over the live clip)
+  const live = t >= CLIP0 && t < FIN;
+  const kick = live ? 0 : Math.exp(-((t % (2 * BEAT)) * 9)) * 0.022;
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(1 + kick, 1 + kick); ctx.translate(-W / 2, -H / 2);
+  SHOTS.forEach((s, i) => {
+    const next = SHOTS[i + 1];
+    if (t < s.s || (next && t >= next.s + TR)) return;
+    let xf = {};
+    if (next && t >= next.s) { xf = exitXf(next.in, prog(t, next.s, next.s + TR)); if (xf.hide) return; }
+    else if (i > 0 && t < s.s + TR) xf = enterXf(s.in, prog(t, s.s, s.s + TR));
+    const buf = PRE.buf[i % 2], bx = buf.getContext('2d');
+    bx.setTransform(1, 0, 0, 1, 0, 0); bx.globalAlpha = 1; bx.clearRect(0, 0, W, H);
+    ctxSwap(bx, () => s.draw(t, clamp((t - s.s) / (s.e - s.s))));
+    composite(buf, xf);
+  });
+  ctx.restore();
+  grade(t);
+  flashes(t);
+  if (t < 0.4) { ctx.fillStyle = `rgba(0,0,0,${1 - prog(t, 0, 0.4)})`; ctx.fillRect(0, 0, W, H); }
+  if (t > DUR - 0.7) { ctx.fillStyle = `rgba(0,0,0,${E.inOutSine(prog(t, DUR - 0.7, DUR - 0.05))})`; ctx.fillRect(0, 0, W, H); }
+}
+// temporarily route drawing helpers to another context
+function ctxSwap(other, fn) { const keep = ctx; ctx = other; try { fn(); } finally { ctx = keep; } }
+
+window.READY = init().then(() => { render(0); return true; });
+if (location.search.includes('play')) window.READY.then(() => {
+  const t0 = performance.now();
+  const loop = async () => { const t = ((performance.now() - t0) / 1000) % DUR; await prep(t); render(t); requestAnimationFrame(loop); };
+  loop();
+});
+</script>
+</body>
+</html>

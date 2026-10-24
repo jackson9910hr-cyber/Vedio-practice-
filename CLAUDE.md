@@ -3,6 +3,8 @@
 Code-only generators for motion-graphics / family videos.
 - `showreel/` — 15s kinetic motion-graphics showreel (2 photos)
 - `family/` — cinematic warm "family trip" photo film (11 photos), run `family/fetch-fonts.sh` first
+- `birthday/` — 60s vertical (9:16) party film: 14 photos `assets/p01–p14.jpg` + a live clip as frames
+  `assets/v/{a,b}_####.jpg` with audio `assets/clipA/B.wav`; run `birthday/fetch-fonts.sh` first
 - Each project: `index.html` (Canvas scenes, `render(t)`), `render.js` (Playwright → ffmpeg),
   `audio.py` (synthesized score). Photos go in `<project>/assets/` (never committed).
 
